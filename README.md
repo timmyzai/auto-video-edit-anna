@@ -27,11 +27,15 @@ CEP bridge panel inside Premiere Pro 2020 (evalScript)
 Premiere project / sequences / trackItems
 
 Offline, before touching Premiere:
-raw footage ──ffmpeg──▶ mono 16kHz wav
-   ──Silero VAD──▶ voice spans
-   ──RMS/dBFS envelope──▶ other-sound spans
+raw footage ──ffmpeg──▶ raw PCM (piped, no file/library needed)
+   ──Silero VAD (ONNX, via onnxruntime-node)──▶ voice spans
+   ──RMS envelope──▶ other-sound spans
    ──merge per config──▶ keep_segments.json (frame-accurate in/out points)
 ```
+
+The classifier is plain Node.js — no Python/PyTorch. Silero VAD runs as a 2.3MB ONNX
+model through `onnxruntime-node`, which is the only real dependency; everything else
+is stdlib + a couple hundred lines of JS in `silence_classifier/`.
 
 Rough cuts are assembled by **inserting only the "keep" segments** onto a brand new
 sequence — not by deleting from an existing one. Premiere's ExtendScript API has no
@@ -65,14 +69,15 @@ through its source first. Leave `unsafe-script` (raw script execution) **off** �
 only use its named, verified tools — and don't expose its HTTP transport; stick to
 local stdio.
 
-### 2. Python environment for the classifier
+### 2. Node.js environment for the classifier
 
 ```bash
 cd auto-video-edit-anna
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
+npm install
 ```
+
+That pulls in `onnxruntime-node` (the only dependency). The Silero VAD model itself
+(`models/silero_vad.onnx`, ~2.3MB) is already checked into this repo — no download step.
 
 Also requires `ffmpeg`/`ffprobe` on `PATH`.
 
@@ -82,10 +87,9 @@ Also requires `ffmpeg`/`ffprobe` on `PATH`.
 2. Adjust `config/rough_cut_config.json` if the defaults don't fit this project.
 3. Generate keep segments:
    ```bash
-   python silence_classifier/classify.py \
+   node silence_classifier/classify.js \
      --config config/rough_cut_config.json \
      --raw-dir raw \
-     --work-dir work \
      --out keep_segments.json
    ```
 4. Hand `keep_segments.json` to Claude Code (with the `premiere-pro-mcp` server
@@ -102,3 +106,13 @@ Also requires `ffmpeg`/`ffprobe` on `PATH`.
   before trusting the full pipeline — don't assume version support.
 - Frame rate must match between raw footage and the target sequence; a mismatch
   shifts every cut point.
+- `npm install` currently reports 2 high-severity advisories against `adm-zip`, a
+  transitive dependency `onnxruntime-node` uses only to unzip its own bundled native
+  binary during install (not something that touches your footage or any untrusted
+  input at runtime). Worth revisiting if `onnxruntime-node` ships a fixed release.
+- The VAD wrapper (`silence_classifier/vad.js`) uses a plain per-chunk probability
+  threshold rather than Silero's full hysteresis/min-duration smoothing algorithm —
+  `classify.js` already handles gap-bridging (`min_silence_ms`) and padding
+  downstream, so this is intentionally simpler, not a shortcut that loses accuracy
+  where it matters. Verified end-to-end against a synthetic test clip with known
+  silent/tone/noise regions before this was committed.

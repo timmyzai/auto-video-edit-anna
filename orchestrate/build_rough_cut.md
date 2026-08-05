@@ -1,7 +1,7 @@
 # Playbook: assemble a Premiere rough cut from `keep_segments.json`
 
 This is written for Claude to follow, using the `premiere-pro-mcp` tools, once
-`keep_segments.json` has been produced by `silence_classifier/classify.py`.
+`keep_segments.json` has been produced by `silence_classifier/classify.js`.
 
 `keep_segments.json` looks like:
 
@@ -24,7 +24,7 @@ cuts are frame-accurate. `keep_seconds` is for human-readable review/logging onl
 ## Steps
 
 1. **Read `keep_segments.json`.** One entry per raw clip, clips are already in
-   the order they should appear in the rough cut (`classify.py` sorts by filename
+   the order they should appear in the rough cut (`classify.js` sorts by filename
    — if the user wants a different order, re-sort this list before proceeding).
 
 2. **Import each raw clip** into the current Premiere project with `import_media`,

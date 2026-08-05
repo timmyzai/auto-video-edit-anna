@@ -1,0 +1,16 @@
+{
+  "name": "auto-video-edit-anna",
+  "version": "1.0.0",
+  "description": "Voice/silence classifier that drives an automated Premiere Pro rough cut via MCP",
+  "type": "module",
+  "bin": {
+    "classify": "silence_classifier/classify.js"
+  },
+  "scripts": {
+    "classify": "node silence_classifier/classify.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "onnxruntime-node": "^1.27.0"
+  }
+}
