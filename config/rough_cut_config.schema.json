@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RoughCutConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "voice_priority": {
+      "type": "boolean",
+      "description": "If true, any span where voice is detected is always kept, regardless of amplitude."
+    },
+    "other_sound_threshold_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "When no voice is present, a span is kept only if its peak amplitude reaches this percent of full scale (0-100)."
+    },
+    "min_silence_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Silences shorter than this are ignored (not cut) to avoid reacting to breaths/plosives."
+    },
+    "pre_roll_padding_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Extra time kept before a detected sound span starts."
+    },
+    "post_roll_padding_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Extra time kept after a detected sound span ends."
+    },
+    "vad_confidence_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Minimum Silero VAD confidence to count a frame as voice."
+    }
+  },
+  "required": [
+    "voice_priority",
+    "other_sound_threshold_pct",
+    "min_silence_ms",
+    "pre_roll_padding_ms",
+    "post_roll_padding_ms",
+    "vad_confidence_threshold"
+  ]
+}

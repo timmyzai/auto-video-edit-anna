@@ -1,0 +1,9 @@
+{
+  "$schema": "./rough_cut_config.schema.json",
+  "voice_priority": true,
+  "other_sound_threshold_pct": 10,
+  "min_silence_ms": 500,
+  "pre_roll_padding_ms": 80,
+  "post_roll_padding_ms": 120,
+  "vad_confidence_threshold": 0.5
+}
