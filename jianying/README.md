@@ -33,7 +33,8 @@ render/export. So the pipeline splits in two:
 npm install   # capcut-cli is a regular dependency, already in package.json
 ```
 
-Jianying Pro must be installed.
+Jianying Pro must be installed and opened at least once (so it has a real drafts
+folder for `capcut doctor` to detect - see below).
 
 ## Usage
 
@@ -47,6 +48,19 @@ Then in Jianying:
    only scans its drafts folder on startup, not live.
 2. Open the draft named `"My Rough Cut"` (or whatever `--draft-name` you gave).
 3. Click **导出** (Export) top-right, set resolution/framerate, confirm.
+
+### Where the draft actually gets written
+
+`build_draft.js` does **not** hardcode a drafts-folder path. It shells out to
+`capcut doctor` and uses whichever install (CapCut or JianYing, Windows or Mac) that
+command reports as actually present, and fails loudly with a clear message if neither
+is found rather than silently guessing. This was a deliberate fix, not the original
+design: an earlier version hardcoded
+`~/AppData/Local/JianyingPro/User Data/Projects/com.lveditor.draft`, and that
+assumption broke silently the moment the installed Jianying version migrated its real
+storage location on first launch - the script kept "succeeding" while writing drafts
+into a folder Jianying's UI never actually reads, with no error to signal it. Pass
+`--draft-folder <path>` to override the detected location if you ever need to.
 
 ## When to use this vs. Premiere
 
@@ -71,7 +85,24 @@ not a segment-by-segment audit.
   projects — always give `--draft-name` something clearly distinguishable from your
   actual work. `build_draft.js` deletes and replaces any existing draft with the
   same name without asking, so don't reuse a name you care about.
-- `capcut-cli`'s version-support matrix (`node_modules/capcut-cli/docs/version-support.md`)
-  is worth checking if Jianying itself rejects a generated draft as corrupted -
-  JianYing 6.0+ encrypts its draft format and isn't writable by this tool at all;
-  only the pre-6.0 plaintext era (confirmed working: 5.9.0) is supported.
+- **First launch of a newer Jianying build can migrate your existing drafts into its
+  own recycle bin.** Observed firsthand: opening Jianying Pro 8.9.0 for the first time
+  on a machine that had older drafts moved them into
+  `<drafts folder>/.recycle_bin/`, indexed there with a `tm_draft_removed` timestamp -
+  intact, not corrupted, but no longer showing on the home screen. This is Jianying's
+  own migration behavior, unrelated to this pipeline, and predates any project this
+  pipeline creates. If your own prior projects disappear after opening Jianying,
+  check its own trash/recycle-bin UI inside the app to restore them - don't hand-edit
+  `root_meta_info.json` to "fix" this; the app's own restore path is much safer than
+  manual JSON surgery on your real project data.
+- `capcut-cli`'s version-support matrix
+  (`node_modules/capcut-cli/docs/version-support.md`) is the authoritative source if
+  Jianying itself rejects a generated draft as corrupted - treat any summary of it
+  written here (including in past versions of this file) as a snapshot that can go
+  stale, not a substitute for checking the live doc. Confirmed firsthand: JianYing
+  8.9.0 (well past the "6.0+ encrypted-draft era" the matrix warns about) compiles
+  and registers a fresh draft without issue, because creating a brand-new draft never
+  stamps version markers in the first place - the write-time version guard the matrix
+  describes only applies to *mutating an existing* draft that already carries
+  markers from a newer app build, which is a different operation than what
+  `build_draft.js` does.

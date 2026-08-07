@@ -12,6 +12,9 @@
   "license": "ISC",
   "dependencies": {
     "capcut-cli": "^0.16.0",
-    "onnxruntime-node": "^1.27.0"
+    "cli-progress": "^3.12.0",
+    "node-notifier": "^10.0.1",
+    "onnxruntime-node": "^1.27.0",
+    "ora": "^9.4.1"
   }
 }

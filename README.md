@@ -68,9 +68,11 @@ tool is non-destructive: your raw clips and existing sequences are never touched
 
 ## One-time setup
 
-**Setting up a new machine? Use `SETUP.md`** — a step-by-step checklist with a
-verify command after each step, scoped to the Jianying path. This section just
-covers the Premiere control layer, which `SETUP.md` intentionally skips.
+**Setting up a new machine? Use `SETUP.md`** — a step-by-step checklist (Node
+environment, `ffmpeg`, config sanity check, an end-to-end smoke test) with a verify
+command after each step, scoped to the Jianying path. This section only covers what
+`SETUP.md` intentionally skips: the Premiere control layer, needed for the Premiere
+path only.
 
 ### Control layer: `premiere-pro-mcp` (Premiere path only)
 
@@ -107,10 +109,6 @@ extension signature logs specifically.
 through its source first. Leave `unsafe-script` (raw script execution) **off** —
 only use its named, verified tools — and don't expose its HTTP transport; stick to
 local stdio.
-
-The Premiere path also needs the same Node.js environment (`npm install`,
-`ffmpeg`/`ffprobe` on `PATH`) as the Jianying path — see `SETUP.md` Phase 2 for
-the exact commands and how to verify them.
 
 ## Running it
 
@@ -176,10 +174,13 @@ tell you.
   trusting the full pipeline — don't assume version support.
 - Frame rate must match between raw footage and the target sequence; a mismatch
   shifts every cut point.
-- `npm install` currently reports 2 high-severity advisories against `adm-zip`, a
+- `npm install` currently reports 4 advisories: 2 high-severity against `adm-zip`, a
   transitive dependency `onnxruntime-node` uses only to unzip its own bundled native
   binary during install (not something that touches your footage or any untrusted
-  input at runtime). Worth revisiting if `onnxruntime-node` ships a fixed release.
+  input at runtime), and 2 moderate against `uuid`, pulled in by `node-notifier`
+  (used for the "job done" desktop notification after classification/draft builds)
+  purely for internal notification IDs, never fed untrusted input. Worth revisiting
+  if either package ships a fixed release.
 - The VAD wrapper (`silence_classifier/vad.js`) uses a plain per-chunk probability
   threshold rather than Silero's full hysteresis/min-duration smoothing algorithm —
   `classify.js` already handles gap-bridging (`min_silence_ms`) and padding

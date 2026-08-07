@@ -7,6 +7,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import cliProgress from "cli-progress";
+import notifier from "node-notifier";
+
 import { getAmplitudeSpans, getAdaptiveAmplitudeSpans } from "./amplitude.js";
 import { loadPcmFloat32, loadPcmFloat32ForVad, probeVideo, VAD_SAMPLE_RATE } from "./extract_audio.js";
 import { getVoiceSpans } from "./vad.js";
@@ -70,9 +73,8 @@ export function secondsToFrames(spans, fps) {
   });
 }
 
-async function classifyClip(videoPath, config) {
+async function classifyClip(videoPath, config, { fps, durationS }) {
   const { samples, sampleRate } = loadPcmFloat32(videoPath, VAD_SAMPLE_RATE);
-  const { fps, durationS } = probeVideo(videoPath);
 
   const ampSpans = config.adaptive_threshold
     ? getAdaptiveAmplitudeSpans(samples, sampleRate, {
@@ -125,22 +127,76 @@ async function main() {
     throw new Error(`No video files found in ${args.rawDir}`);
   }
 
+  // Probed up front (ffprobe only, no audio decode - cheap even for many clips) so the
+  // bar can weight progress by footage duration rather than clip count: a 20s clip and
+  // a 20min clip cost wildly different processing time, so "clips done" alone would give
+  // a misleading ETA the moment clip lengths aren't uniform. classifyClip takes the
+  // result directly instead of re-probing internally, so each clip is only probed once.
+  const clipMeta = clips.map((clip) => probeVideo(clip));
+  const totalDurationS = clipMeta.reduce((sum, m) => sum + m.durationS, 0);
+
+  const bar = new cliProgress.SingleBar(
+    {
+      format: "Classifying [{bar}] {percentage}% | {value}s / {total}s | ETA {eta}s | {clip}",
+      stream: process.stderr,
+      hideCursor: true,
+      clearOnComplete: false,
+    },
+    cliProgress.Presets.shades_classic
+  );
+  // Guards against NaN% if every clip somehow probes to 0s duration - cli-progress
+  // divides by `total` to compute the percentage shown.
+  bar.start(Math.max(1, Math.round(totalDurationS)), 0, { clip: path.basename(clips[0]) });
+
   const results = [];
-  for (const clip of clips) {
-    console.error(`Classifying ${clip} ...`);
-    const result = await classifyClip(clip, config);
+  const warnings = [];
+  let processedS = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+    bar.update(Math.round(processedS), { clip: path.basename(clip) });
+    const result = await classifyClip(clip, config, clipMeta[i]);
+    processedS += clipMeta[i].durationS;
+    bar.update(Math.round(processedS), { clip: path.basename(clip) });
     if (result.keep.length === 0) {
-      console.error(
-        `  WARNING: 0 segments kept for ${clip} (duration ${result.duration_s.toFixed(1)}s). ` +
+      // Deferred until after bar.stop() below - interleaving console.error with an
+      // active cli-progress bar corrupts the terminal line (the bar redraws over it).
+      warnings.push(
+        `WARNING: 0 segments kept for ${clip} (duration ${result.duration_s.toFixed(1)}s). ` +
         `This clip's audio never crossed the voice/amplitude thresholds in the config — ` +
         `double-check that's actually intended before handing this off to Premiere.`
       );
     }
     results.push(result);
   }
+  bar.stop();
+  for (const w of warnings) console.error(w);
 
   fs.writeFileSync(args.out, JSON.stringify(results, null, 2));
-  console.error(`Wrote ${results.length} clip(s) to ${args.out}`);
+  const keptS = results.reduce(
+    (sum, r) => sum + r.keep_seconds.reduce((s, [a, b]) => s + (b - a), 0),
+    0
+  );
+  console.error(
+    `Wrote ${results.length} clip(s) to ${args.out} — ${keptS.toFixed(1)}s kept of ${totalDurationS.toFixed(1)}s raw.`
+  );
+
+  notifyDone(
+    "Rough-cut classification complete",
+    `${results.length} clip(s), ${keptS.toFixed(0)}s kept of ${totalDurationS.toFixed(0)}s raw.`
+  );
+}
+
+// Best-effort OS toast - a missing/blocked notifier backend (e.g. locked-down
+// environments without snoreToast) must never turn an otherwise-successful run into
+// a failed one, so failures here are logged, not thrown.
+function notifyDone(title, message) {
+  try {
+    notifier.notify({ title, message, sound: true }, (err) => {
+      if (err) console.error(`(notification failed: ${err.message})`);
+    });
+  } catch (err) {
+    console.error(`(notification failed: ${err.message})`);
+  }
 }
 
 function parseArgs(argv) {

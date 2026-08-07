@@ -12,13 +12,49 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import ora from "ora";
+import notifier from "node-notifier";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_DRAFT_FOLDER = path.join(
-  os.homedir(), "AppData", "Local", "JianyingPro", "User Data", "Projects", "com.lveditor.draft"
-);
+
+// A hardcoded guess at this path goes stale the moment Jianying changes its storage
+// layout (confirmed firsthand: opening a newer Jianying build migrated this machine's
+// real drafts folder out from under an earlier hardcoded constant here, with no error -
+// the draft silently landed in an unindexed location instead). `capcut doctor` already
+// does real Windows/Mac x CapCut/JianYing detection (checks which install actually has a
+// live drafts folder), so ask it instead of guessing.
+function detectDraftFolder(capcutBin) {
+  const result = spawnSync(`"${capcutBin}"`, ["doctor"], {
+    encoding: "utf-8",
+    shell: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let report;
+  try {
+    report = JSON.parse(result.stdout);
+  } catch {
+    throw new Error(
+      `capcut doctor produced unparseable output (exit ${result.status}): ${result.stdout || result.stderr}`
+    );
+  }
+  const draftChecks = (report.checks || []).filter((c) => c.name === "draft-dir");
+  const found = draftChecks.find((c) => c.status === "ok");
+  if (!found) {
+    const detail = draftChecks.map((c) => c.detail).join("; ") || "no draft-dir checks reported";
+    throw new Error(
+      `Could not auto-detect a Jianying/CapCut drafts folder (${detail}). ` +
+      `Open Jianying or CapCut once to initialize it, or pass --draft-folder explicitly.`
+    );
+  }
+  const match = found.detail.match(/found \((.+)\)$/);
+  if (!match) {
+    throw new Error(`capcut doctor reported the drafts folder as found but detail didn't include a path: ${found.detail}`);
+  }
+  return match[1];
+}
 
 function parseArgs(argv) {
   const out = {};
@@ -34,7 +70,8 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const draftFolder = args.draftFolder || DEFAULT_DRAFT_FOLDER;
+  const capcutBin = path.join(__dirname, "..", "node_modules", ".bin", process.platform === "win32" ? "capcut.cmd" : "capcut");
+  const draftFolder = args.draftFolder || detectDraftFolder(capcutBin);
   const fps = args.fps ? Number(args.fps) : 30;
 
   const clips = JSON.parse(fs.readFileSync(args.keepSegments, "utf-8"));
@@ -79,19 +116,99 @@ function main() {
     fs.rmSync(draftPath, { recursive: true, force: true });
   }
 
-  const capcutBin = path.join(__dirname, "..", "node_modules", ".bin", process.platform === "win32" ? "capcut.cmd" : "capcut");
+  // Despite only assembling JSON at the spec level, capcut-cli's own addVideo() (called
+  // once per timeline item) copies the source into the draft's assets folder, and -
+  // confirmed by profiling against a real 540MB source with 68 kept segments (~2 minutes
+  // real time) - on every item after the first it SHA1-hashes the ENTIRE source file
+  // twice to verify a same-named asset already there is still the same content
+  // (capcut-cli/dist/factory.js: copyAssetDeduped -> sameContent -> fileSha1), with no
+  // caching across items in the same run. A rough cut's segments all share one source
+  // clip by construction, so this is the dominant cost, not an edge case - runtime scales
+  // with segments x source-file-size, not just segment count. No CLI flag skips it
+  // (checked `compile`'s usage: only --out/--drafts/--check/--plan/--template/--quiet
+  // exist) - this is capcut-cli's own behavior, not something our spec can opt out of.
+  // The spinner is a "don't assume this is stuck" signal for what can be a genuinely
+  // multi-minute wait on real footage, not decoration for what only looked fast on small
+  // synthetic test inputs.
+  //
+  // spawnSync (not execFileSync) with stdio explicitly piped: execFileSync's default
+  // stdio inherits the child's stderr LIVE into our own stderr - confirmed by testing -
+  // which is the exact stream ora is mid-render on. capcut-cli writes a status line to
+  // its own stderr on success, and that write landing between the spinner's start and
+  // its cursor-controlled succeed/fail redraw corrupts the terminal line. Capturing both
+  // streams (spawnSync always returns them, success or failure - unlike execFileSync,
+  // which only returns stdout on success) and printing them ourselves after the spinner
+  // has resolved avoids that.
+  const spinner = ora({
+    text: `Compiling draft (${totalSegments} segments)... this can take several minutes for many segments from one large source file`,
+    stream: process.stderr,
+  }).start();
+  // shell:true does NOT quote array args for you on Windows - it just joins them with
+  // spaces before handing the line to cmd.exe. Confirmed by direct reproduction: an
+  // unquoted --drafts value containing a space ("...\JianyingPro\User Data\Projects\...")
+  // silently split at the space, so capcut-cli's arg parser only ever saw
+  // "...\JianyingPro\User" as the --drafts value and wrote the draft there instead of the
+  // intended com.lveditor.draft folder - with no error, since the leftover
+  // "Data\Projects\..." token just looked like an unrecognized positional arg. Quoting
+  // every path-bearing argument ourselves is required, not optional, whenever shell:true
+  // is combined with real Windows paths (which routinely contain spaces, e.g. "Program
+  // Files" or, as here, "User Data").
+  const q = (s) => `"${s}"`;
+  let result;
   try {
-    const result = execFileSync(capcutBin, ["compile", specPath, "--jianying", "--drafts", draftFolder, "-H"], {
+    result = spawnSync(q(capcutBin), ["compile", q(specPath), "--jianying", "--drafts", q(draftFolder), "-H"], {
       encoding: "utf-8",
       shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    console.error(result);
   } finally {
     fs.rmSync(specPath, { force: true });
   }
 
-  console.error(`\nSaved draft '${args.draftName}' in ${draftFolder}`);
+  if (result.error) {
+    spinner.fail("capcut compile failed to start.");
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    spinner.fail("capcut compile failed.");
+    if (result.stdout) console.error(result.stdout);
+    if (result.stderr) console.error(result.stderr);
+    throw new Error(`capcut compile exited with code ${result.status}`);
+  }
+  spinner.succeed(`Draft compiled (${totalSegments} segments).`);
+  if (result.stderr) console.error(result.stderr);
+  console.error(result.stdout);
+
+  // Report capcut-cli's own resolved draft_path rather than assuming it matches the
+  // --drafts folder we passed in - now that argument quoting is fixed above they should
+  // always agree, but this is what actually caught the quoting bug in the first place
+  // (a truncated --drafts value silently produced a different, wrong draft_path with no
+  // error), so it stays as a cheap correctness check rather than trusting our own input.
+  let savedIn = draftFolder;
+  try {
+    const parsed = JSON.parse(result.stdout);
+    if (parsed.draft_path) savedIn = path.dirname(parsed.draft_path);
+  } catch {
+    // Unparseable stdout (e.g. --jianying warnings prepended some other line) - fall
+    // back to the requested folder rather than fail a successful build over this.
+  }
+
+  console.error(`\nSaved draft '${args.draftName}' in ${savedIn}`);
   console.error(`${totalSegments} segments, ${cumulative.toFixed(2)}s total. Open Jianying to preview before exporting.`);
+
+  notifyDone("Draft ready", `'${args.draftName}' — ${totalSegments} segments, ${cumulative.toFixed(0)}s. Open Jianying to review and export.`);
+}
+
+// Best-effort OS toast - a missing/blocked notifier backend must never turn an
+// otherwise-successful build into a failed one, so failures here are logged, not thrown.
+function notifyDone(title, message) {
+  try {
+    notifier.notify({ title, message, sound: true }, (err) => {
+      if (err) console.error(`(notification failed: ${err.message})`);
+    });
+  } catch (err) {
+    console.error(`(notification failed: ${err.message})`);
+  }
 }
 
 function round3(n) {
