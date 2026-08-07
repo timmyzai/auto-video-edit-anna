@@ -11,6 +11,7 @@
   },
   "license": "ISC",
   "dependencies": {
+    "capcut-cli": "^0.16.0",
     "onnxruntime-node": "^1.27.0"
   }
 }

@@ -7,8 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getAmplitudeSpans } from "./amplitude.js";
-import { loadPcmFloat32, probeVideo, VAD_SAMPLE_RATE } from "./extract_audio.js";
+import { getAmplitudeSpans, getAdaptiveAmplitudeSpans } from "./amplitude.js";
+import { loadPcmFloat32, loadPcmFloat32ForVad, probeVideo, VAD_SAMPLE_RATE } from "./extract_audio.js";
 import { getVoiceSpans } from "./vad.js";
 
 const VIDEO_EXTS = new Set([".mp4", ".mov", ".mxf", ".avi", ".mkv"]);
@@ -52,6 +52,16 @@ export function padSpans(spans, preS, postS, durationS) {
   return mergeSpans(padded);
 }
 
+// Drops spans shorter than minDurationS after padding/merging. A span that's
+// still this short even after padding almost never came from real speech - a
+// spoken syllable sustains energy well past a single 20ms window, so what's
+// left is a transient (click, tap, breath) that briefly crossed the amplitude
+// threshold. Isolated blips like this are jarring in the final cut precisely
+// because they aren't speech, so they get no visual/audio continuity around them.
+export function filterShortSpans(spans, minDurationS) {
+  return spans.filter(([start, end]) => end - start >= minDurationS);
+}
+
 export function secondsToFrames(spans, fps) {
   return spans.map(([start, end]) => {
     const startF = Math.floor(start * fps);
@@ -64,11 +74,19 @@ async function classifyClip(videoPath, config) {
   const { samples, sampleRate } = loadPcmFloat32(videoPath, VAD_SAMPLE_RATE);
   const { fps, durationS } = probeVideo(videoPath);
 
-  const ampSpans = getAmplitudeSpans(samples, sampleRate, config.other_sound_threshold_pct);
+  const ampSpans = config.adaptive_threshold
+    ? getAdaptiveAmplitudeSpans(samples, sampleRate, {
+        localWindowS: config.adaptive_window_s,
+        localPercentile: config.adaptive_local_percentile,
+        ratio: config.adaptive_ratio,
+        floorPct: config.adaptive_floor_pct,
+      })
+    : getAmplitudeSpans(samples, sampleRate, config.other_sound_threshold_pct);
 
   let soundSpans;
   if (config.voice_priority) {
-    const voiceSpans = await getVoiceSpans(samples, sampleRate, config.vad_confidence_threshold);
+    const { samples: vadSamples, sampleRate: vadSampleRate } = loadPcmFloat32ForVad(videoPath, VAD_SAMPLE_RATE);
+    const voiceSpans = await getVoiceSpans(vadSamples, vadSampleRate, config.vad_confidence_threshold);
     soundSpans = mergeSpans([...voiceSpans, ...ampSpans]);
   } else {
     soundSpans = mergeSpans(ampSpans);
@@ -79,7 +97,10 @@ async function classifyClip(videoPath, config) {
 
   const preS = config.pre_roll_padding_ms / 1000;
   const postS = config.post_roll_padding_ms / 1000;
-  const keepSpans = padSpans(soundSpans, preS, postS, durationS);
+  let keepSpans = padSpans(soundSpans, preS, postS, durationS);
+
+  const minDurationS = config.min_segment_duration_ms / 1000;
+  keepSpans = filterShortSpans(keepSpans, minDurationS);
 
   return {
     clip: videoPath,
@@ -107,7 +128,15 @@ async function main() {
   const results = [];
   for (const clip of clips) {
     console.error(`Classifying ${clip} ...`);
-    results.push(await classifyClip(clip, config));
+    const result = await classifyClip(clip, config);
+    if (result.keep.length === 0) {
+      console.error(
+        `  WARNING: 0 segments kept for ${clip} (duration ${result.duration_s.toFixed(1)}s). ` +
+        `This clip's audio never crossed the voice/amplitude thresholds in the config — ` +
+        `double-check that's actually intended before handing this off to Premiere.`
+      );
+    }
+    results.push(result);
   }
 
   fs.writeFileSync(args.out, JSON.stringify(results, null, 2));

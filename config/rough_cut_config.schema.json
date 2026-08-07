@@ -12,7 +12,33 @@
       "type": "number",
       "minimum": 0,
       "maximum": 100,
-      "description": "When no voice is present, a span is kept only if its peak amplitude reaches this percent of full scale (0-100)."
+      "description": "When no voice is present, a span is kept only if its RMS amplitude (20ms windows) reaches this percent of full scale (0-100). Ignored when adaptive_threshold is true."
+    },
+    "adaptive_threshold": {
+      "type": "boolean",
+      "description": "If true, use a per-scene local threshold instead of the single clip-wide other_sound_threshold_pct. Fixes quiet talkers being cut in a louder scene (background chatter, other speakers) where their voice still sits well above the ambient level around them but under a clip-wide cutoff. Off by default - existing configs are unaffected."
+    },
+    "adaptive_window_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Size (seconds) of the centered rolling window used to estimate the local ambient/background noise floor. Only used when adaptive_threshold is true."
+    },
+    "adaptive_local_percentile": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Percentile within the local window treated as the ambient noise floor (low = quietest moments nearby). Only used when adaptive_threshold is true."
+    },
+    "adaptive_ratio": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "A window is kept if its RMS is at least this many times the local noise floor. Only used when adaptive_threshold is true."
+    },
+    "adaptive_floor_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Absolute safety-net minimum (percent of full scale) under the local threshold, so a long near-silent stretch isn't treated as signal just because it's the loudest thing nearby. Only used when adaptive_threshold is true."
     },
     "min_silence_ms": {
       "type": "integer",
@@ -34,6 +60,11 @@
       "minimum": 0,
       "maximum": 1,
       "description": "Minimum Silero VAD confidence to count a frame as voice."
+    },
+    "min_segment_duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Final kept spans shorter than this (after padding/merging) are dropped entirely. A span still this short even after padding almost never came from real speech - it's a transient (click, tap, breath) that briefly crossed the amplitude threshold, and shows up as a jarring isolated blip in the cut."
     }
   },
   "required": [
@@ -42,6 +73,7 @@
     "min_silence_ms",
     "pre_roll_padding_ms",
     "post_roll_padding_ms",
-    "vad_confidence_threshold"
+    "vad_confidence_threshold",
+    "min_segment_duration_ms"
   ]
 }

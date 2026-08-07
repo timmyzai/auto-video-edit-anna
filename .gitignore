@@ -2,6 +2,8 @@ node_modules/
 raw/*
 !raw/.gitkeep
 work/
+output/*
+!output/.gitkeep
 *.wav
 keep_segments*.json
 .env
