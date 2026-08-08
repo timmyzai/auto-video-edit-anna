@@ -12,49 +12,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import ora from "ora";
+import cliProgress from "cli-progress";
 import notifier from "node-notifier";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { detectDraftFolder, capcutBinPath } from "./lib/draft_folder.js";
 
-// A hardcoded guess at this path goes stale the moment Jianying changes its storage
-// layout (confirmed firsthand: opening a newer Jianying build migrated this machine's
-// real drafts folder out from under an earlier hardcoded constant here, with no error -
-// the draft silently landed in an unindexed location instead). `capcut doctor` already
-// does real Windows/Mac x CapCut/JianYing detection (checks which install actually has a
-// live drafts folder), so ask it instead of guessing.
-function detectDraftFolder(capcutBin) {
-  const result = spawnSync(`"${capcutBin}"`, ["doctor"], {
-    encoding: "utf-8",
-    shell: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let report;
-  try {
-    report = JSON.parse(result.stdout);
-  } catch {
-    throw new Error(
-      `capcut doctor produced unparseable output (exit ${result.status}): ${result.stdout || result.stderr}`
-    );
-  }
-  const draftChecks = (report.checks || []).filter((c) => c.name === "draft-dir");
-  const found = draftChecks.find((c) => c.status === "ok");
-  if (!found) {
-    const detail = draftChecks.map((c) => c.detail).join("; ") || "no draft-dir checks reported";
-    throw new Error(
-      `Could not auto-detect a Jianying/CapCut drafts folder (${detail}). ` +
-      `Open Jianying or CapCut once to initialize it, or pass --draft-folder explicitly.`
-    );
-  }
-  const match = found.detail.match(/found \((.+)\)$/);
-  if (!match) {
-    throw new Error(`capcut doctor reported the drafts folder as found but detail didn't include a path: ${found.detail}`);
-  }
-  return match[1];
-}
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
   const out = {};
@@ -68,9 +34,9 @@ function parseArgs(argv) {
   return out;
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const capcutBin = path.join(__dirname, "..", "node_modules", ".bin", process.platform === "win32" ? "capcut.cmd" : "capcut");
+  const capcutBin = capcutBinPath();
   const draftFolder = args.draftFolder || detectDraftFolder(capcutBin);
   const fps = args.fps ? Number(args.fps) : 30;
 
@@ -116,33 +82,20 @@ function main() {
     fs.rmSync(draftPath, { recursive: true, force: true });
   }
 
-  // Despite only assembling JSON at the spec level, capcut-cli's own addVideo() (called
-  // once per timeline item) copies the source into the draft's assets folder, and -
-  // confirmed by profiling against a real 540MB source with 68 kept segments (~2 minutes
-  // real time) - on every item after the first it SHA1-hashes the ENTIRE source file
-  // twice to verify a same-named asset already there is still the same content
-  // (capcut-cli/dist/factory.js: copyAssetDeduped -> sameContent -> fileSha1), with no
-  // caching across items in the same run. A rough cut's segments all share one source
-  // clip by construction, so this is the dominant cost, not an edge case - runtime scales
-  // with segments x source-file-size, not just segment count. No CLI flag skips it
-  // (checked `compile`'s usage: only --out/--drafts/--check/--plan/--template/--quiet
-  // exist) - this is capcut-cli's own behavior, not something our spec can opt out of.
-  // The spinner is a "don't assume this is stuck" signal for what can be a genuinely
-  // multi-minute wait on real footage, not decoration for what only looked fast on small
-  // synthetic test inputs.
-  //
-  // spawnSync (not execFileSync) with stdio explicitly piped: execFileSync's default
-  // stdio inherits the child's stderr LIVE into our own stderr - confirmed by testing -
-  // which is the exact stream ora is mid-render on. capcut-cli writes a status line to
-  // its own stderr on success, and that write landing between the spinner's start and
-  // its cursor-controlled succeed/fail redraw corrupts the terminal line. Capturing both
-  // streams (spawnSync always returns them, success or failure - unlike execFileSync,
-  // which only returns stdout on success) and printing them ourselves after the spinner
-  // has resolved avoids that.
-  const spinner = ora({
-    text: `Compiling draft (${totalSegments} segments)... this can take several minutes for many segments from one large source file`,
-    stream: process.stderr,
-  }).start();
+  // capcut-cli's own addVideo() (called once per timeline item) copies the source into
+  // the draft's assets folder. It used to SHA1-hash the entire source file twice on
+  // every item after the first just to re-verify a same-named asset was still the same
+  // content (capcut-cli/dist/factory.js: copyAssetDeduped -> sameContent -> fileSha1),
+  // with no caching across items - since a rough cut's segments all share one source
+  // clip by construction, that was O(segments x file size) of pure redundant disk I/O.
+  // Patched locally (patches/capcut-cli+0.16.0.patch, kept in sync via `postinstall`)
+  // to memoize the hash by resolved-path+size+mtime, so each unique source file gets
+  // hashed once, not once per segment - collapses what was a 45-100+ minute compile on
+  // real footage (three clips, ~5.6GB combined, 920 segments) down to about a minute.
+  // The same patch adds an exact per-item progress counter (copyAssetDeduped fires once
+  // per timeline item, a 1:1 mapping with segment count) written to ROUGH_CUT_PROGRESS_FILE
+  // when that env var is set - a no-op for any other capcut-cli usage that doesn't set it.
+  const progressFile = path.join(os.tmpdir(), `capcut-progress-${process.pid}.json`);
   // shell:true does NOT quote array args for you on Windows - it just joins them with
   // spaces before handing the line to cmd.exe. Confirmed by direct reproduction: an
   // unquoted --drafts value containing a space ("...\JianyingPro\User Data\Projects\...")
@@ -154,28 +107,60 @@ function main() {
   // is combined with real Windows paths (which routinely contain spaces, e.g. "Program
   // Files" or, as here, "User Data").
   const q = (s) => `"${s}"`;
+
+  const bar = new cliProgress.SingleBar({
+    format: "Compiling draft |{bar}| {percentage}% | {value}/{total} segments | ETA: {eta_formatted}",
+    stream: process.stderr,
+    hideCursor: true,
+  }, cliProgress.Presets.shades_classic);
+  bar.start(totalSegments, 0);
+
+  const pollTimer = setInterval(() => {
+    try {
+      const progress = JSON.parse(fs.readFileSync(progressFile, "utf-8"));
+      bar.update(Math.min(progress.done, totalSegments));
+    } catch {
+      // Progress file may not exist yet (child hasn't started copying assets) or be
+      // mid-write - both transient, just skip this tick.
+    }
+  }, 250);
+
   let result;
   try {
-    result = spawnSync(q(capcutBin), ["compile", q(specPath), "--jianying", "--drafts", q(draftFolder), "-H"], {
-      encoding: "utf-8",
-      shell: true,
-      stdio: ["ignore", "pipe", "pipe"],
+    result = await new Promise((resolvePromise) => {
+      const child = spawn(q(capcutBin), ["compile", q(specPath), "--jianying", "--drafts", q(draftFolder), "-H"], {
+        encoding: "utf-8",
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, ROUGH_CUT_PROGRESS_FILE: progressFile },
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", (d) => { stdout += d; });
+      child.stderr.on("data", (d) => { stderr += d; });
+      child.on("error", (error) => resolvePromise({ error, stdout, stderr, status: null }));
+      child.on("close", (status) => resolvePromise({ status, stdout, stderr }));
     });
   } finally {
+    clearInterval(pollTimer);
     fs.rmSync(specPath, { force: true });
+    fs.rmSync(progressFile, { force: true });
   }
 
   if (result.error) {
-    spinner.fail("capcut compile failed to start.");
+    bar.stop();
+    console.error("capcut compile failed to start.");
     throw result.error;
   }
   if (result.status !== 0) {
-    spinner.fail("capcut compile failed.");
+    bar.stop();
+    console.error("capcut compile failed.");
     if (result.stdout) console.error(result.stdout);
     if (result.stderr) console.error(result.stderr);
     throw new Error(`capcut compile exited with code ${result.status}`);
   }
-  spinner.succeed(`Draft compiled (${totalSegments} segments).`);
+  bar.update(totalSegments);
+  bar.stop();
+  console.error(`Draft compiled (${totalSegments} segments).`);
   if (result.stderr) console.error(result.stderr);
   console.error(result.stdout);
 
@@ -215,4 +200,7 @@ function round3(n) {
   return Math.round(n * 1000) / 1000;
 }
 
-main();
+main().catch((err) => {
+  console.error(err.stack || err.message || err);
+  process.exitCode = 1;
+});

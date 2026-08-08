@@ -147,6 +147,145 @@ tunable thresholds (voice priority, silence threshold, padding, min silence leng
 that `silence_classifier/classify.js` reads. Don't hardcode threshold values
 elsewhere — route changes through this config.
 
+## Subtitles (`subtitles/`)
+
+Default part of the pipeline (see the Autonomous workflow below — only skip it if
+the user explicitly says no subtitles this run), after `keep_segments.json` exists
+(built or not-yet-built into a draft) and before/after building the Jianying draft:
+generates a two-line Simplified-Chinese SRT and imports it into a draft as its own
+text track.
+
+- `subtitles/generate_subtitles.js --keep-segments keep_segments.json --out
+  output/subtitles.srt` — builds the exact concatenated timeline audio
+  `jianying/build_draft.js` would produce (same clip-by-clip, span-by-span
+  cumulative math), transcribes it with a local Whisper model
+  (`@xenova/transformers`, no Python, no cloud call), and writes an SRT with two
+  lines per cue:
+  1. `<A/B/C>: <transcript>` — speaker-tagged dialogue.
+  2. an auto-generated action/scene caption for that shot.
+- `jianying/add_subtitles.js --draft-name "<name>" --srt output/subtitles.srt` —
+  imports that SRT into an *existing* draft via `capcut import-srt` (new text
+  track, one segment per cue). Same "Jianying must be closed first" constraint as
+  `build_draft.js`.
+
+**Speech may be Cantonese or Mandarin — there's no dedicated Cantonese ("yue")
+Whisper language token**, so `generate_subtitles.js` forces `language: "zh"`
+regardless; this transcribes Cantonese into Chinese characters reasonably but with
+more variance than clear Mandarin. Whatever script Whisper (or the action-caption
+translator) outputs, `subtitles/generate_subtitles.js` and
+`subtitles/caption_moments.js` both run it through OpenCC (`from: "hk"` — chosen
+over `"tw"` because it keeps Cantonese colloquial characters like 哋/佢/嘅 that
+`"tw"`'s mapping table drops) to force Simplified — idempotent on text that's
+already Simplified, so always run, never conditionally.
+
+**Speaker tags (A/B/C) are a pitch/timbre clustering heuristic
+(`subtitles/diarize.js`), not real voiceprint diarization.** There's no
+pyannote-equivalent available without Python. It clusters cues by median pitch
+(autocorrelation) and spectral centroid (direct-summation DFT — frames are short
+enough this doesn't need an FFT dependency), so two speakers with similar voice
+(same gender/register) can land in the same cluster and get mislabeled as one
+person. Treat it as a first-pass approximation to review, not ground truth — don't
+present it as reliable per-speaker attribution without a human pass on footage
+where that matters.
+
+**Action captions (`subtitles/caption_moments.js`) are one local
+image-caption-model call per *kept span* (not per subtitle cue)**, cached and
+reused across every cue inside that span — a 4-sentence answer inside one shot
+gets one caption, not four near-identical ones. Quality is generic/model-grade
+(small English image-captioning model + local en→zh translation), not a
+context-aware human summary — good for "something to show" on every cue for free,
+not a polished narration. At ~900+ kept spans this is the slow part of the
+pipeline — run it as a background job, don't block on it synchronously, even with
+the batching below.
+
+**Captioning is batched, not one-item-at-a-time — a naive per-item loop was the
+dominant cost of the whole pipeline at real segment counts.** Frame extraction
+(ffmpeg, I/O/seek-bound) runs with bounded concurrency; image-captioning and
+translation run as batched model calls. The two models' batched output shapes are
+NOT parallel — verified directly against the installed `@xenova/transformers`
+build rather than assumed: image-to-text nests one level deeper per item
+(`[[{generated_text}], [{generated_text}], ...]`) while translation stays flat
+(`[{translation_text}, {translation_text}, ...]`). Getting this backwards silently
+misaligns every caption with the wrong item rather than throwing - if you touch
+`caption_moments.js`, re-verify both shapes against the actual installed model
+before trusting a refactor, don't assume symmetry.
+
+**Speaker clustering must be deterministic — re-running on unchanged input has to
+produce identical output.** The k-means++ init in `diarize.js` originally used
+`Math.random()`, so the same footage could get a different A/B split (or different
+speaker labels) on every run. Fixed with a fixed-seed `mulberry32` PRNG. Don't
+reintroduce `Math.random()` there.
+
+**A checkpoint SRT (dialogue-only, no action captions) is written right after
+transcription + diarization, before the slow captioning phase starts** — so
+killing/crashing during the ~hour-long captioning pass still leaves a usable
+single-line subtitle file instead of nothing. The full two-line SRT overwrites it
+once captioning finishes.
+
+**Whisper's long-form failure mode is repeating one phrase for several consecutive
+chunks** (heavy noise, cross-talk, or non-speech that slipped past the silence
+classifier) — `generate_subtitles.js` collapses runs of exact-duplicate transcript
+text (keeping the first couple of repeats, dropping the rest) as a cheap accuracy
+pass that can't touch legitimately distinct dialogue (which won't be
+byte-identical cue to cue).
+
+**`capcut import-srt` joins a cue's multiple text lines with `\n` into one text
+segment** (confirmed by reading `capcut-cli`'s `parseSrt` in
+`node_modules/capcut-cli/dist/srt.js` directly, not assumed) - this is what makes
+the two-line-per-cue SRT format land as two lines in one caption box rather than
+two separate captions. If a future `capcut-cli` upgrade changes that parser's
+behavior, the two-line format would need re-verifying.
+
+## Autonomous rough-cut workflow (when the user hands you a raw file)
+
+When the user gives you a file (path, or drops it somewhere) and asks for a rough
+cut, run the whole pipeline yourself via Bash/PowerShell — they should not need to
+type or paste any commands themselves. Do this instead of just printing the command
+for them to run:
+
+1. Get the file into `raw/` (move/copy it there if it lives elsewhere), and check
+   `raw/` doesn't also contain a human-edited reference/comparison clip left over
+   from a prior diffing session — move that out first if so (see the note under
+   `## Commands` on why: `classify.js` has no filter and will treat it as source
+   footage).
+2. Run `node silence_classifier/suggest_threshold.js --file raw/<clip>` to get a
+   per-clip starting `other_sound_threshold_pct`. Never carry over a threshold
+   number from a previous clip/session — it doesn't transfer (see the per-clip
+   note above).
+3. Write that value into `config/rough_cut_config.json`, keeping
+   `adaptive_threshold: true` for scenes with mixed loudness (quiet talker in a
+   loud scene, etc.).
+4. Run `node silence_classifier/classify.js --config config/rough_cut_config.json
+   --raw-dir raw --out keep_segments.json`.
+5. Sanity-check before handing off: total kept duration against what's expected,
+   and average segment length (well under ~1s average = over-fragmented — usually
+   means the threshold is too aggressive, see guidance above). If it looks off,
+   re-tune and re-run step 4 rather than proceeding anyway.
+6. Build the draft. Default to the Jianying/CapCut path
+   (`node jianying/build_draft.js --keep-segments keep_segments.json --draft-name
+   "..."`) since it's the only one actually exercised end-to-end — confirm Jianying
+   is closed first, it refuses to run otherwise. Only use the Premiere MCP path
+   instead if the user specifically asks for Premiere.
+7. Subtitles are part of the default pipeline, not an opt-in extra — always run
+   `node subtitles/generate_subtitles.js --keep-segments keep_segments.json --out
+   output/subtitles.srt` (background it — see the Subtitles section above, this is
+   the slow step) then `node jianying/add_subtitles.js --draft-name "..." --srt
+   output/subtitles.srt` against the same draft name used in step 6. Only skip
+   this step if the user explicitly says they don't want subtitles for this run.
+8. Report what was produced (segment count, total duration) and remind the user
+   that opening the app and clicking Export is the one remaining manual step —
+   don't imply it also happened. Jianying needs to be (re)started after a new
+   draft is created if it was already open. Since subtitles ran, always restate
+   the two caveats plainly (not buried): speaker tags A/B/C come from a
+   pitch/energy-clustering heuristic, not real voiceprint diarization, and can
+   mislabel same-timbre speakers (see Subtitles section); action-summary captions
+   are auto-generated per shot (frame sampling + local image captioning +
+   translation), not a human review of the ~900 clips — generic/model-grade, not
+   a polished narration.
+
+If a step's output looks wrong (durations way off, segments too choppy, etc.),
+stop and flag it rather than continuing on to the next step with bad data.
+
 ## Commands
 
 ```bash

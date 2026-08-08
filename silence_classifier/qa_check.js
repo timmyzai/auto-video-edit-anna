@@ -71,6 +71,7 @@ function main() {
   const threshold = config.other_sound_threshold_pct;
 
   let totalPass = 0, totalBorderline = 0, totalReject = 0;
+  const allPassed = [], allReview = [];
 
   for (const clip of clips) {
     const { samples, sampleRate } = loadPcmFloat32(clip.clip, 16000);
@@ -111,13 +112,16 @@ function main() {
       for (const r of review) console.error(`    [${r.start},${r.end}] ${r.durMs}ms peakRms=${r.peakRms}% peakVoicing=${r.peakVoicing}`);
     }
 
-    const passOut = args.keepSegments.replace(/\.json$/, "") + ".qa-passed.json";
-    const reviewOut = args.keepSegments.replace(/\.json$/, "") + ".qa-review.json";
-    fs.writeFileSync(passOut, JSON.stringify([{ ...clip, keep_seconds: passed }], null, 2));
-    fs.writeFileSync(reviewOut, JSON.stringify(review, null, 2));
-    console.error(`\n  wrote ${passOut} (auto-passed only)`);
-    console.error(`  wrote ${reviewOut} (borderline list for your review)`);
+    allPassed.push({ ...clip, keep_seconds: passed });
+    for (const r of review) allReview.push({ clip: clip.clip, ...r });
   }
+
+  const passOut = args.keepSegments.replace(/\.json$/, "") + ".qa-passed.json";
+  const reviewOut = args.keepSegments.replace(/\.json$/, "") + ".qa-review.json";
+  fs.writeFileSync(passOut, JSON.stringify(allPassed, null, 2));
+  fs.writeFileSync(reviewOut, JSON.stringify(allReview, null, 2));
+  console.error(`\nwrote ${passOut} (auto-passed only, ${clips.length} clip(s))`);
+  console.error(`wrote ${reviewOut} (borderline list for your review)`);
 
   console.error(`\n=== Total: ${totalPass} pass, ${totalBorderline} borderline, ${totalReject} auto-rejected ===`);
 }

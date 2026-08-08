@@ -49,6 +49,20 @@ Then in Jianying:
 2. Open the draft named `"My Rough Cut"` (or whatever `--draft-name` you gave).
 3. Click **导出** (Export) top-right, set resolution/framerate, confirm.
 
+### Optional: subtitles
+
+```bash
+# Generate a two-line Simplified-Chinese SRT (speaker-tagged transcript + an
+# auto-generated action caption per shot), then import it into an existing draft:
+node subtitles/generate_subtitles.js --keep-segments keep_segments.json --out output/subtitles.srt
+node jianying/add_subtitles.js --draft-name "My Rough Cut" --srt output/subtitles.srt
+```
+
+See the "Subtitles" section in the root `CLAUDE.md` for how this works (local
+Whisper transcription, pitch-clustering speaker tags, local image-caption-model
+action lines) and its known accuracy caveats. It's slow at real segment counts
+(one frame-extract + two model calls per kept span) - run it in the background.
+
 ### Where the draft actually gets written
 
 `build_draft.js` does **not** hardcode a drafts-folder path. It shells out to

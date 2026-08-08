@@ -7,3 +7,4 @@ output/*
 *.wav
 keep_segments*.json
 .env
+models/transformers-cache/

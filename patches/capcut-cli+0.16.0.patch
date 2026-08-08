@@ -1,0 +1,69 @@
+diff --git a/node_modules/capcut-cli/dist/factory.js b/node_modules/capcut-cli/dist/factory.js
+index 6f1cf50..45eabc8 100644
+--- a/node_modules/capcut-cli/dist/factory.js
++++ b/node_modules/capcut-cli/dist/factory.js
+@@ -1,5 +1,5 @@
+ import { createHash, randomUUID } from "node:crypto";
+-import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
++import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+ import { basename, dirname, resolve } from "node:path";
+ import { stripBom } from "./bom.js";
+ import { uuidHex } from "./decorators.js";
+@@ -33,8 +33,33 @@ export function uuid() {
+     return randomUUID();
+ }
+ // --- Asset copy (collision-safe) ---
++// Keyed by resolved path + size + mtime so a changed-on-disk file still re-hashes;
++// a rough cut's segments all share one source file by construction, and without this
++// every segment after the first re-hashed the ENTIRE source file twice (sameContent
++// below hashes both sides) just to re-confirm what the previous segment already
++// proved - O(segments x file size) of pure redundant disk I/O on real footage.
++const fileSha1Cache = new Map();
+ function fileSha1(path) {
+-    return createHash("sha1").update(readFileSync(path)).digest("hex");
++    const st = statSync(path);
++    const cacheKey = `${resolve(path)}:${st.size}:${st.mtimeMs}`;
++    const cached = fileSha1Cache.get(cacheKey);
++    if (cached) return cached;
++    // Node's readFileSync refuses whole-file reads over ~2GiB, which real video
++    // sources routinely exceed. Stream in fixed chunks instead - no ceiling.
++    const hash = createHash("sha1");
++    const fd = openSync(path, "r");
++    try {
++        const buf = Buffer.allocUnsafe(8 * 1024 * 1024);
++        let bytesRead;
++        while ((bytesRead = readSync(fd, buf, 0, buf.length, null)) > 0) {
++            hash.update(bytesRead === buf.length ? buf : buf.subarray(0, bytesRead));
++        }
++    } finally {
++        closeSync(fd);
++    }
++    const digest = hash.digest("hex");
++    fileSha1Cache.set(cacheKey, digest);
++    return digest;
+ }
+ /** True if both paths exist and have byte-identical content. */
+ function sameContent(a, b) {
+@@ -54,7 +79,22 @@ function sameContent(a, b) {
+  *
+  * Returns the destination path the draft should reference.
+  */
++// Fires once per addVideo/addAudio call - i.e. once per timeline item - so it's an
++// exact, not estimated, count. Opt-in via env var: unset (the default, everywhere
++// capcut-cli runs outside this repo's own wrapper) makes this a no-op.
++let assetsProcessedCount = 0;
++function reportAssetProgress() {
++    const progressFile = process.env.ROUGH_CUT_PROGRESS_FILE;
++    if (!progressFile) return;
++    assetsProcessedCount++;
++    try {
++        writeFileSync(progressFile, JSON.stringify({ done: assetsProcessedCount, at: Date.now() }));
++    } catch {
++        // Progress reporting is best-effort - never let it fail a real compile.
++    }
++}
+ function copyAssetDeduped(srcPath, assetsDir, fallbackName) {
++    reportAssetProgress();
+     mkdirSync(assetsDir, { recursive: true });
+     const filename = basename(srcPath) || fallbackName;
+     const destPath = resolve(assetsDir, filename);
