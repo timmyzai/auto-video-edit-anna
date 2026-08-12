@@ -1,5 +1,5 @@
 diff --git a/node_modules/capcut-cli/dist/factory.js b/node_modules/capcut-cli/dist/factory.js
-index 6f1cf50..45eabc8 100644
+index 6f1cf50..a6fd256 100644
 --- a/node_modules/capcut-cli/dist/factory.js
 +++ b/node_modules/capcut-cli/dist/factory.js
 @@ -1,5 +1,5 @@
@@ -9,7 +9,7 @@ index 6f1cf50..45eabc8 100644
  import { basename, dirname, resolve } from "node:path";
  import { stripBom } from "./bom.js";
  import { uuidHex } from "./decorators.js";
-@@ -33,8 +33,33 @@ export function uuid() {
+@@ -33,8 +33,65 @@ export function uuid() {
      return randomUUID();
  }
  // --- Asset copy (collision-safe) ---
@@ -19,8 +19,39 @@ index 6f1cf50..45eabc8 100644
 +// below hashes both sides) just to re-confirm what the previous segment already
 +// proved - O(segments x file size) of pure redundant disk I/O on real footage.
 +const fileSha1Cache = new Map();
++// The in-memory cache above only helps within ONE process - fine for `compile`
++// (always one process for a whole draft) but not for a caller that inserts many
++// segments via separate `add-video` CLI invocations (one process each), where
++// it resets to empty every single call and silently reintroduces the exact
++// O(segments x file size) redundant-hashing cost the cache above exists to
++// avoid. Opt-in via env var (unset = today's in-memory-only behavior, a no-op
++// for every capcut-cli use outside this repo's own insert_rough_cut.js):
++// persist the cache to a JSON sidecar so repeat calls against the same source
++// file across separate processes can skip re-hashing too.
++const sha1CacheFilePath = process.env.ROUGH_CUT_SHA1_CACHE_FILE;
++let sha1CacheFileLoaded = false;
++function loadSha1CacheFile() {
++    if (sha1CacheFileLoaded || !sha1CacheFilePath) return;
++    sha1CacheFileLoaded = true;
++    try {
++        const entries = JSON.parse(readFileSync(sha1CacheFilePath, "utf-8"));
++        for (const [k, v] of Object.entries(entries)) fileSha1Cache.set(k, v);
++    } catch {
++        // Missing/corrupt cache file just means a cold start - never fail a
++        // real compile/add-video over a best-effort optimization.
++    }
++}
++function persistSha1Cache() {
++    if (!sha1CacheFilePath) return;
++    try {
++        writeFileSync(sha1CacheFilePath, JSON.stringify(Object.fromEntries(fileSha1Cache)));
++    } catch {
++        // Best-effort, same reasoning as above.
++    }
++}
  function fileSha1(path) {
 -    return createHash("sha1").update(readFileSync(path)).digest("hex");
++    loadSha1CacheFile();
 +    const st = statSync(path);
 +    const cacheKey = `${resolve(path)}:${st.size}:${st.mtimeMs}`;
 +    const cached = fileSha1Cache.get(cacheKey);
@@ -40,11 +71,12 @@ index 6f1cf50..45eabc8 100644
 +    }
 +    const digest = hash.digest("hex");
 +    fileSha1Cache.set(cacheKey, digest);
++    persistSha1Cache();
 +    return digest;
  }
  /** True if both paths exist and have byte-identical content. */
  function sameContent(a, b) {
-@@ -54,7 +79,22 @@ function sameContent(a, b) {
+@@ -54,7 +111,22 @@ function sameContent(a, b) {
   *
   * Returns the destination path the draft should reference.
   */

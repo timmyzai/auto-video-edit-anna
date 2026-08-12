@@ -35,32 +35,49 @@ function parseArgs(argv) {
     const key = argv[i].replace(/^--/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     out[key] = argv[i + 1];
   }
-  if (!out.file) throw new Error("Usage: suggest_threshold.js --file <video> [--target-percentile 90]");
+  if (!out.file && !out.files) {
+    throw new Error("Usage: suggest_threshold.js (--file <video> | --files <p1,p2,...>) [--target-percentile 90]");
+  }
+  if (out.file && out.files) throw new Error("Pass --file or --files, not both.");
   return out;
 }
 
-function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const targetP = parseFloat(args.targetPercentile) / 100;
-
-  const { samples, sampleRate } = loadPcmFloat32(args.file, 16000);
+// Shared by both modes - one file's RMS distribution -> one suggested value,
+// with the same stderr printout either way.
+function suggestForFile(filePath, targetP, targetPercentileLabel) {
+  const { samples, sampleRate } = loadPcmFloat32(filePath, 16000);
   const dist = rmsDistributionPct(samples, sampleRate);
 
-  console.error(`RMS distribution for ${args.file} (% of full scale, ${dist.length} windows):`);
+  console.error(`RMS distribution for ${filePath} (% of full scale, ${dist.length} windows):`);
   for (const p of [0.5, 0.75, 0.9, 0.95, 0.99]) {
     console.error(`  p${Math.round(p * 100)}: ${percentile(dist, p).toFixed(2)}`);
   }
   console.error(`  max: ${dist[dist.length - 1].toFixed(2)}`);
 
   const suggested = percentile(dist, targetP);
-  console.error(
-    `\nSuggested other_sound_threshold_pct (p${args.targetPercentile}): ${suggested.toFixed(1)}`
-  );
+  console.error(`Suggested other_sound_threshold_pct (p${targetPercentileLabel}): ${suggested.toFixed(1)}\n`);
+  return suggested;
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const targetP = parseFloat(args.targetPercentile) / 100;
+
   console.error(
     "This is a starting point, not a guarantee - build a short test cut and adjust up/down " +
-    "if too much or too little survives. Lower = keeps more (safer), higher = cuts more."
+    "if too much or too little survives. Lower = keeps more (safer), higher = cuts more.\n"
   );
-  console.log(suggested.toFixed(1));
+
+  if (args.files) {
+    const files = args.files.split(",").map((p) => p.trim());
+    const suggestions = files.map((f) => suggestForFile(f, targetP, args.targetPercentile));
+    // One comma-separated line, same order as --files, so it pipes straight
+    // into `classify.js --thresholds`.
+    console.log(suggestions.map((s) => s.toFixed(1)).join(","));
+  } else {
+    const suggested = suggestForFile(args.file, targetP, args.targetPercentile);
+    console.log(suggested.toFixed(1));
+  }
 }
 
 main();

@@ -1,14 +1,14 @@
 {
   "name": "auto-video-edit-anna",
   "version": "1.0.0",
-  "description": "Voice/silence classifier that drives an automated Premiere Pro rough cut via MCP",
+  "description": "Voice/silence classifier that drives an automated rough cut in Premiere Pro (via MCP, see premiere/) or JianYing/CapCut Pro (see jianying/)",
   "type": "module",
   "bin": {
     "classify": "silence_classifier/classify.js"
   },
   "scripts": {
     "classify": "node silence_classifier/classify.js",
-    "rough-cut": "node rough_cut.js",
+    "rough-cut": "node jianying/rough_cut.js",
     "postinstall": "patch-package"
   },
   "license": "ISC",

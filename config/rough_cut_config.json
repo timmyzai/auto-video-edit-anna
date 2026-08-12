@@ -1,7 +1,7 @@
 {
   "$schema": "./rough_cut_config.schema.json",
-  "voice_priority": true,
-  "other_sound_threshold_pct": 6,
+  "voice_priority": false,
+  "other_sound_threshold_pct": 9.3,
   "adaptive_threshold": true,
   "adaptive_window_s": 6,
   "adaptive_local_percentile": 25,

@@ -35,7 +35,7 @@ function main() {
   const draftFolder = args.draftFolder || detectDraftFolder(capcutBin);
   const draftPath = path.join(draftFolder, args.draftName);
   if (!fs.existsSync(draftPath)) {
-    throw new Error(`No draft named "${args.draftName}" found in ${draftFolder}. Check the name (capcut projects "${draftFolder}") or pass --draft-folder.`);
+    throw new Error(`No draft named "${args.draftName}" found in ${draftFolder}. Check the name (capcut projects "${args.draftName}") or pass --draft-folder.`);
   }
 
   const q = (s) => `"${s}"`; // shell:true on Windows needs explicit quoting for any path with spaces

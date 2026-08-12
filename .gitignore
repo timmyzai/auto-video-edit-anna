@@ -1,10 +1,9 @@
 node_modules/
 raw/*
 !raw/.gitkeep
-work/
-output/*
-!output/.gitkeep
 *.wav
+projects/
 keep_segments*.json
 .env
 models/transformers-cache/
+*.log

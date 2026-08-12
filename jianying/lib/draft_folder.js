@@ -5,10 +5,22 @@
 // does real Windows/Mac x CapCut/JianYing detection (checks which install actually has a
 // live drafts folder), so ask it instead of guessing.
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Every generated artifact for one draft (sources.json, keep_segments.json,
+// rough_cut_progress.json, subtitle/caption files) lives under one folder per
+// project instead of scattered at the repo root - draft names are already
+// real Windows folder names (Jianying uses them as its own draft-folder names
+// verbatim), so no sanitizing is needed, just reuse the name directly.
+export function projectDir(draftName) {
+  const dir = path.resolve(path.join(__dirname, "..", "..", "projects", draftName));
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 export function capcutBinPath() {
   return path.join(__dirname, "..", "..", "node_modules", ".bin", process.platform === "win32" ? "capcut.cmd" : "capcut");

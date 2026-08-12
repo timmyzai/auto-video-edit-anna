@@ -8,11 +8,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import cliProgress from "cli-progress";
-import notifier from "node-notifier";
 
 import { getAmplitudeSpans, getAdaptiveAmplitudeSpans } from "./amplitude.js";
 import { loadPcmFloat32, loadPcmFloat32ForVad, probeVideo, VAD_SAMPLE_RATE } from "./extract_audio.js";
 import { getVoiceSpans } from "./vad.js";
+import { meaningfulCueSourceSpans } from "./dialogue_filter.js";
+import { parseSrtFile } from "../lib/srt.js";
 
 const VIDEO_EXTS = new Set([".mp4", ".mov", ".mxf", ".avi", ".mkv"]);
 
@@ -61,8 +62,18 @@ export function padSpans(spans, preS, postS, durationS) {
 // left is a transient (click, tap, breath) that briefly crossed the amplitude
 // threshold. Isolated blips like this are jarring in the final cut precisely
 // because they aren't speech, so they get no visual/audio continuity around them.
-export function filterShortSpans(spans, minDurationS) {
-  return spans.filter(([start, end]) => end - start >= minDurationS);
+//
+// protectedSpans (source-relative [start,end] pairs, same as extraKeepSpans)
+// exempts a short span from this drop if it overlaps one - those came from a
+// meaningful dialogue cue or one containing English content (see
+// dialogue_filter.js's isMeaningfulCue), which is a content signal, not a
+// noise one, so length alone shouldn't be grounds to cut it. Everything else
+// (pure amplitude/VAD-derived spans) is still filtered on length as before.
+export function filterShortSpans(spans, minDurationS, protectedSpans = []) {
+  return spans.filter(([start, end]) => {
+    if (end - start >= minDurationS) return true;
+    return protectedSpans.some(([ps, pe]) => ps < end && pe > start);
+  });
 }
 
 export function secondsToFrames(spans, fps) {
@@ -73,7 +84,16 @@ export function secondsToFrames(spans, fps) {
   });
 }
 
-async function classifyClip(videoPath, config, { fps, durationS }) {
+// extraKeepSpans: source-relative [start,end] pairs from a content-aware
+// dialogue transcript (silence_classifier/dialogue_filter.js) that MUST be
+// kept regardless of amplitude/VAD - additive-only, unioned in alongside
+// voice/amplitude spans before the same merge/pad/filter pipeline applies to
+// everything uniformly. See CLAUDE.md's "Autonomous rough-cut workflow" for
+// why: amplitude/VAD is volume-based, not content-based, so a quiet-but-
+// meaningful phrase can fall under threshold and get cut - this is the
+// safety net against that, and it can only widen a keep-span, never narrow
+// one (empty array = today's behavior, unchanged).
+async function classifyClip(videoPath, config, { fps, durationS }, extraKeepSpans = []) {
   const { samples, sampleRate } = loadPcmFloat32(videoPath, VAD_SAMPLE_RATE);
 
   const ampSpans = config.adaptive_threshold
@@ -89,9 +109,9 @@ async function classifyClip(videoPath, config, { fps, durationS }) {
   if (config.voice_priority) {
     const { samples: vadSamples, sampleRate: vadSampleRate } = loadPcmFloat32ForVad(videoPath, VAD_SAMPLE_RATE);
     const voiceSpans = await getVoiceSpans(vadSamples, vadSampleRate, config.vad_confidence_threshold);
-    soundSpans = mergeSpans([...voiceSpans, ...ampSpans]);
+    soundSpans = mergeSpans([...voiceSpans, ...ampSpans, ...extraKeepSpans]);
   } else {
-    soundSpans = mergeSpans(ampSpans);
+    soundSpans = mergeSpans([...ampSpans, ...extraKeepSpans]);
   }
 
   const minGapS = config.min_silence_ms / 1000;
@@ -102,7 +122,11 @@ async function classifyClip(videoPath, config, { fps, durationS }) {
   let keepSpans = padSpans(soundSpans, preS, postS, durationS);
 
   const minDurationS = config.min_segment_duration_ms / 1000;
-  keepSpans = filterShortSpans(keepSpans, minDurationS);
+  const beforeCount = keepSpans.length;
+  keepSpans = filterShortSpans(keepSpans, minDurationS, extraKeepSpans);
+  const protectedShortCount = extraKeepSpans.length > 0
+    ? keepSpans.filter(([s, e]) => e - s < minDurationS).length
+    : 0;
 
   return {
     clip: videoPath,
@@ -110,6 +134,8 @@ async function classifyClip(videoPath, config, { fps, durationS }) {
     duration_s: durationS,
     keep_seconds: keepSpans.map(([s, e]) => [Math.round(s * 1000) / 1000, Math.round(e * 1000) / 1000]),
     keep: secondsToFrames(keepSpans, fps),
+    dropped_short_spans: beforeCount - keepSpans.length,
+    protected_short_spans: protectedShortCount,
   };
 }
 
@@ -117,14 +143,61 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = JSON.parse(fs.readFileSync(args.config, "utf-8"));
 
-  const clips = fs
-    .readdirSync(args.rawDir)
-    .filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()))
-    .sort()
-    .map((f) => path.join(args.rawDir, f));
+  const clips = args.files
+    ? args.files.split(",").map((p) => path.resolve(p.trim()))
+    : fs
+        .readdirSync(args.rawDir)
+        .filter((f) => VIDEO_EXTS.has(path.extname(f).toLowerCase()))
+        .sort()
+        .map((f) => path.join(args.rawDir, f));
 
   if (clips.length === 0) {
-    throw new Error(`No video files found in ${args.rawDir}`);
+    throw new Error(`No video files found in ${args.files ? "--files" : args.rawDir}`);
+  }
+
+  // Per-file thresholds for --files mode (silence_classifier/suggest_threshold.js
+  // --files prints these in the same order) - other_sound_threshold_pct is
+  // relative to each clip's own loudness, so applying one config-wide value
+  // across multiple files violates the per-clip guidance CLAUDE.md documents.
+  let thresholds = null;
+  if (args.thresholds) {
+    thresholds = args.thresholds.split(",").map(Number);
+    if (thresholds.length !== clips.length) {
+      throw new Error(`--thresholds has ${thresholds.length} value(s) but --files has ${clips.length} - must match.`);
+    }
+  } else if (args.files) {
+    console.error(
+      "WARNING: --files given without --thresholds - applying config's single " +
+      "other_sound_threshold_pct to every file, which violates the per-clip guidance " +
+      "(each clip's own loudness distribution differs). Run suggest_threshold.js --files first."
+    );
+  }
+
+  // Content-aware safety net (optional): union meaningful dialogue-cue spans
+  // into each clip's keep-spans before the normal amplitude/VAD pipeline -
+  // see classifyClip's extraKeepSpans param and silence_classifier/dialogue_filter.js.
+  let extraSpansByClip = new Map();
+  if (args.dialogueSrt && args.rawTimelineMap) {
+    const { rawTimeline } = JSON.parse(fs.readFileSync(args.rawTimelineMap, "utf-8"));
+    const dialogueCues = parseSrtFile(args.dialogueSrt);
+    const chunks = meaningfulCueSourceSpans(dialogueCues, rawTimeline);
+    for (const chunk of chunks) {
+      // Keyed on path.resolve() to match the `clips` lookup key below -
+      // rawTimeline's sourceClip comes from the draft (forward slashes) while
+      // `clips` comes from --files resolved to the platform's native
+      // separator, so comparing raw strings silently drops every chunk on
+      // Windows (backslash vs forward slash never string-equal).
+      const key = path.resolve(chunk.sourceClip);
+      if (!extraSpansByClip.has(key)) extraSpansByClip.set(key, []);
+      extraSpansByClip.get(key).push([chunk.sourceStart, chunk.sourceEnd]);
+    }
+    const totalChunkS = chunks.reduce((sum, c) => sum + (c.sourceEnd - c.sourceStart), 0);
+    console.error(
+      `Content-aware safety net: ${chunks.length} meaningful dialogue cue chunk(s), ` +
+      `${totalChunkS.toFixed(1)}s total, will be unioned into keep-spans across ${extraSpansByClip.size} clip(s).`
+    );
+  } else if (args.dialogueSrt || args.rawTimelineMap) {
+    throw new Error("--dialogue-srt and --raw-timeline-map must be given together.");
   }
 
   // Probed up front (ffprobe only, no audio decode - cheap even for many clips) so the
@@ -154,7 +227,9 @@ async function main() {
   for (let i = 0; i < clips.length; i++) {
     const clip = clips[i];
     bar.update(Math.round(processedS), { clip: path.basename(clip) });
-    const result = await classifyClip(clip, config, clipMeta[i]);
+    const effectiveConfig = thresholds ? { ...config, other_sound_threshold_pct: thresholds[i] } : config;
+    const extraKeepSpans = extraSpansByClip.get(clip) || [];
+    const result = await classifyClip(clip, effectiveConfig, clipMeta[i], extraKeepSpans);
     processedS += clipMeta[i].durationS;
     bar.update(Math.round(processedS), { clip: path.basename(clip) });
     if (result.keep.length === 0) {
@@ -179,24 +254,6 @@ async function main() {
   console.error(
     `Wrote ${results.length} clip(s) to ${args.out} — ${keptS.toFixed(1)}s kept of ${totalDurationS.toFixed(1)}s raw.`
   );
-
-  notifyDone(
-    "Rough-cut classification complete",
-    `${results.length} clip(s), ${keptS.toFixed(0)}s kept of ${totalDurationS.toFixed(0)}s raw.`
-  );
-}
-
-// Best-effort OS toast - a missing/blocked notifier backend (e.g. locked-down
-// environments without snoreToast) must never turn an otherwise-successful run into
-// a failed one, so failures here are logged, not thrown.
-function notifyDone(title, message) {
-  try {
-    notifier.notify({ title, message, sound: true }, (err) => {
-      if (err) console.error(`(notification failed: ${err.message})`);
-    });
-  } catch (err) {
-    console.error(`(notification failed: ${err.message})`);
-  }
 }
 
 function parseArgs(argv) {
@@ -205,8 +262,14 @@ function parseArgs(argv) {
     const key = argv[i].replace(/^--/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     out[key] = argv[i + 1];
   }
-  if (!out.config || !out.rawDir || !out.out) {
-    throw new Error("Usage: classify.js --config <path> --raw-dir <dir> --out <path>");
+  if (!out.config || !out.out || !(out.rawDir || out.files)) {
+    throw new Error(
+      "Usage: classify.js --config <path> --out <path> (--raw-dir <dir> | --files <p1,p2,...>) " +
+      "[--thresholds <t1,t2,...>] [--dialogue-srt <raw-timeline srt> --raw-timeline-map <path>]"
+    );
+  }
+  if (out.rawDir && out.files) {
+    throw new Error("Pass --files or --raw-dir, not both.");
   }
   return out;
 }

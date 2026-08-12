@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // One-command daily entry point: raw footage folder in, Jianying draft out.
-// Chains classify.js -> qa_check.js -> jianying/build_draft.js, self-heals the
-// ffmpeg-on-PATH friction winget leaves behind, and checks Jianying is closed
+// Not part of the default rough-cut skill (which always targets an existing
+// draft - see CLAUDE.md) - this is the standalone no-pre-existing-project
+// fallback path. Chains classify.js -> qa_check.js -> build_draft.js, self-heals
+// the ffmpeg-on-PATH friction winget leaves behind, and checks Jianying is closed
 // up front instead of failing partway through a multi-minute build.
 //
 // Usage:
-//   node rough_cut.js --raw "C:\path\to\footage folder" [--draft-name "My Rough Cut"] [--config config/rough_cut_config.json]
+//   node jianying/rough_cut.js --raw "C:\path\to\footage folder" [--draft-name "My Rough Cut"] [--config config/rough_cut_config.json]
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -87,31 +89,32 @@ function main() {
   if (!fs.existsSync(rawDir) || !fs.statSync(rawDir).isDirectory()) {
     throw new Error(`--raw folder not found: ${rawDir}`);
   }
-  const configPath = path.resolve(args.config || path.join(__dirname, "config", "rough_cut_config.json"));
+  const repoRoot = path.join(__dirname, "..");
+  const configPath = path.resolve(args.config || path.join(repoRoot, "config", "rough_cut_config.json"));
   const draftName = args.draftName || path.basename(rawDir);
 
-  const keepSegmentsPath = path.join(__dirname, "keep_segments.json");
-  const qaPassedPath = path.join(__dirname, "keep_segments.qa-passed.json");
+  const keepSegmentsPath = path.join(repoRoot, "keep_segments.json");
+  const qaPassedPath = path.join(repoRoot, "keep_segments.qa-passed.json");
 
   ensureFfmpegOnPath();
   ensureJianyingClosed();
 
   const node = process.execPath;
   run("1/3 Classifying silence/voice", node, [
-    path.join(__dirname, "silence_classifier", "classify.js"),
+    path.join(repoRoot, "silence_classifier", "classify.js"),
     "--config", configPath,
     "--raw-dir", rawDir,
     "--out", keepSegmentsPath,
   ]);
 
   run("2/3 QA pass", node, [
-    path.join(__dirname, "silence_classifier", "qa_check.js"),
+    path.join(repoRoot, "silence_classifier", "qa_check.js"),
     "--keep-segments", keepSegmentsPath,
     "--config", configPath,
   ]);
 
   run(`3/3 Building Jianying draft "${draftName}"`, node, [
-    path.join(__dirname, "jianying", "build_draft.js"),
+    path.join(__dirname, "build_draft.js"),
     "--keep-segments", qaPassedPath,
     "--draft-name", draftName,
   ]);

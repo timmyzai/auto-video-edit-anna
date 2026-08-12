@@ -1,9 +1,13 @@
 # auto-video-edit-anna
 
-Claude-driven rough cut for Adobe Premiere Pro 2020: strip silent stretches out of raw
-footage before you start real editing. "Silent" is tunable, not fixed:
+Claude-driven rough cut for Adobe Premiere Pro 2020 or Jianying/CapCut: strip silent
+stretches out of raw footage before you start real editing. "Silent" is tunable, not fixed:
 
-- **Voice priority** (default on): any segment with a detected human voice is always kept.
+**Not a developer? See `使用指南.md`** (Simplified Chinese) for a plain step-by-step guide
+with copy-paste prompts — this file and `CLAUDE.md` are for working on the pipeline itself.
+
+- **Voice priority** (default *off* — see CLAUDE.md's VAD section for why): when on, any
+  segment with a detected human voice is always kept.
 - **Other-sound threshold** (relative to *this clip's own* loudness — see
   `silence_classifier/suggest_threshold.js`): when there's no voice, a segment is only
   kept if non-voice audio amplitude reaches this percent of full scale — otherwise cut.
@@ -31,6 +35,8 @@ like noise suppression distorting the waveform in ways that confuse the model wi
 being audible to a human ear). In practice, `other_sound_threshold_pct` is currently
 doing most of the real work regardless of `voice_priority`'s setting. Treat "voice
 priority" as aspirational until this is debugged with a known-clean reference recording.
+Default is `false` — confirmed on real footage that turning it on produces identical
+output at ~40% slower wall time, so there's currently no upside to enabling it.
 
 This repo is the custom half of the pipeline — the audio classifier and the Claude
 playbook. It does **not** contain a Premiere plugin; that's a separate third-party
@@ -143,13 +149,16 @@ local stdio.
 5. Build the actual cut, in either editor — from `keep_segments.qa-passed.json`,
    not the raw classifier output:
    - **Premiere**: hand the QA-passed file to Claude Code (with `premiere-pro-mcp`
-     registered) and point it at `orchestrate/build_rough_cut.md` — it imports the
+     registered) and point it at `premiere/build_rough_cut.md` — it imports the
      clips and assembles a new "Rough Cut - \<date\>" sequence in the open project.
-   - **CapCut / Jianying Pro**: see `jianying/README.md` — a Node.js script that
-     writes a Jianying draft directly (export itself is a manual click in the app,
-     not automated). Better suited to high segment counts (hundreds of cuts) than
-     the Premiere path, which verifies each insert individually and doesn't scale
-     as well past ~50 segments.
+   - **CapCut / Jianying Pro**: see `jianying/README.md`. Default path now expects
+     you to have already imported the raw footage into a Jianying project yourself
+     (so Jianying's own GUI picks the right canvas/fps) — the tool inserts the
+     rough cut into that existing draft rather than creating a new one. A
+     from-scratch fallback (`build_draft.js`) still exists for when there's no
+     pre-existing project. Better suited to high segment counts (hundreds of
+     cuts) than the Premiere path, which verifies each insert individually and
+     doesn't scale as well past ~50 segments.
 6. Review the result. Adjust thresholds and re-run if too much or too little got cut
    — each run produces a fresh sequence/draft, nothing is overwritten.
 
