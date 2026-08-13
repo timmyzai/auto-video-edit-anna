@@ -42,6 +42,48 @@ This repo is the custom half of the pipeline — the audio classifier and the Cl
 playbook. It does **not** contain a Premiere plugin; that's a separate third-party
 MCP server you install once (steps below).
 
+## Day-to-day usage: the Claude Code rough-cut skill
+
+This — not the `raw/` folder flow further down — is how the pipeline is actually
+used day to day. The `raw/` flow is a manual/scripted fallback for the Premiere
+path, or for a Jianying project that doesn't exist yet; the default path always
+targets an existing Jianying draft by name and never touches `raw/`.
+
+**Not a developer? See `使用指南.md`** (linked above) for the full Simplified
+Chinese walkthrough with copy-paste prompts — this section is the terse English
+equivalent for reference.
+
+1. In Jianying Pro, import your raw footage yourself (so Jianying's own GUI
+   picks the right canvas/fps) and place it on a track. Confirm the HDR
+   conversion toggle (HDR 转换工具) is on during import — that's GUI-only,
+   nothing here can script it.
+2. Open a terminal in this repo and start a Claude Code session. This repo
+   doesn't use a separate Claude Code desktop app — it's the CLI, launched
+   from a normal terminal:
+   ```bash
+   code .        # type this into File Explorer's address bar, from the project folder
+   ```
+   then, once VS Code opens, open its integrated terminal (`` Ctrl+` ``) and run:
+   ```bash
+   claude
+   ```
+3. Tell it the Jianying project name and ask for a rough cut (plain language,
+   or `/rough-cut "My Project"`). It resolves the existing draft by that name,
+   classifies the footage, and inserts the cut — it never creates a new draft
+   and never falls back to `raw/`.
+4. Optional add-ons, only if you ask for them: a dialogue-driven safety net
+   for short/quiet meaningful words, and a content-review pass (filler,
+   repetition, false starts, corrections, irrelevant chat, production/setup
+   speech) that reports every cue as **include** / **exclude** / **review** —
+   `review` is never auto-cut, Claude surfaces those to you directly instead.
+   The separate `action-summary` command adds auto-generated captions
+   afterward, if wanted. See `CLAUDE.md`'s "Autonomous rough-cut workflow"
+   for the full detail — the skill runs all of the underlying scripts for
+   you, you don't need to type them yourself.
+5. Export is the one manual step left: restart Jianying if it was already
+   open (it only scans its drafts folder on startup), open the draft, click
+   **导出** (Export).
+
 ## Architecture
 
 ```
@@ -116,7 +158,12 @@ through its source first. Leave `unsafe-script` (raw script execution) **off** �
 only use its named, verified tools — and don't expose its HTTP transport; stick to
 local stdio.
 
-## Running it
+## Manual/scripted path (Premiere, or a from-scratch Jianying draft)
+
+This is **not** what the day-to-day rough-cut skill above does — it's the
+lower-level, `raw/`-folder-based path used for the Premiere workflow, or for
+building a brand-new Jianying draft from scratch (no pre-existing project).
+Skip this section unless you're doing one of those two things.
 
 1. Drop raw footage into `raw/`.
 2. Get a starting threshold for *this* clip — `other_sound_threshold_pct` is relative
@@ -172,7 +219,10 @@ scope for a volume-based classifier. If you compare its output to a human-edited
 reference cut, expect it to under-cut relative to that reference by roughly however
 much of the human's editing was content-driven rather than silence-driven — that's
 not a bug to tune away, it's the honest boundary of what amplitude/VAD analysis can
-tell you.
+tell you. Real content-level editing (redundant takes, false starts, off-topic
+chat) is available as the optional content-review add-on described above — that
+works by having Claude actually read the transcript, not by tuning the amplitude
+classifier, since no volume-based signal can substitute for understanding meaning.
 
 ## Notes / known risks
 
@@ -187,9 +237,12 @@ tell you.
   transitive dependency `onnxruntime-node` uses only to unzip its own bundled native
   binary during install (not something that touches your footage or any untrusted
   input at runtime), and 2 moderate against `uuid`, pulled in by `node-notifier`
-  (used for the "job done" desktop notification after classification/draft builds)
-  purely for internal notification IDs, never fed untrusted input. Worth revisiting
-  if either package ships a fixed release.
+  purely for internal notification IDs, never fed untrusted input. `node-notifier`
+  is only used for the from-scratch `jianying/build_draft.js` fallback's "draft
+  built" desktop toast (manual/scripted path above) — the default day-to-day
+  rough-cut skill has no notification system at all; you watch progress directly
+  in the Claude Code terminal session. Worth revisiting if either advisory ships
+  a fixed release.
 - The VAD wrapper (`silence_classifier/vad.js`) uses a plain per-chunk probability
   threshold rather than Silero's full hysteresis/min-duration smoothing algorithm —
   `classify.js` already handles gap-bridging (`min_silence_ms`) and padding
