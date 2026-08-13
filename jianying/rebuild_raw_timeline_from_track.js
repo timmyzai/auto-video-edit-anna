@@ -27,6 +27,7 @@ import path from "node:path";
 import { findDraft, loadDraft, getTracksByType, findMaterialGlobal } from "capcut-cli";
 
 import { detectDraftFolder, capcutBinPath, projectDir } from "./lib/draft_folder.js";
+import { findOverlappingSourceRanges, formatOverlapReport } from "../lib/timeline.js";
 
 function parseArgs(argv) {
   const out = { trackName: "Rough Cut" };
@@ -73,6 +74,25 @@ function main() {
     })
     .filter(Boolean)
     .sort((a, b) => a.timelineStart - b.timelineStart);
+
+  // Fail loudly here rather than silently writing a rawTimeline that will
+  // make insert_rough_cut.js clone duplicate footage - this track's own
+  // segments are the ONLY source of truth this recovery path has, so if they
+  // already reference overlapping source ranges (e.g. the draft was
+  // reopened/resaved in Jianying since the last known-good state), there is
+  // no way to build a correct map from it. See lib/timeline.js's
+  // findOverlappingSourceRanges for how this was actually caught in practice.
+  const overlaps = findOverlappingSourceRanges(rawTimeline);
+  if (overlaps.length > 0) {
+    throw new Error(
+      `Track "${args.trackName}" itself has overlapping/duplicate source-footage references - ` +
+      `rebuilding a raw-timeline-map from it would silently produce a corrupted rough cut:\n` +
+      `${formatOverlapReport(overlaps)}\n` +
+      `This track is not a valid recovery source as-is. Check for an earlier, clean snapshot ` +
+      `(capcut restore "${args.draftName}" --list, then diff a candidate step's "${args.trackName}" ` +
+      `track's own source ranges the same way before restoring to it) rather than trusting this one.`
+    );
+  }
 
   const sourceFiles = [...new Set(rawTimeline.map((e) => e.sourceClip))];
 

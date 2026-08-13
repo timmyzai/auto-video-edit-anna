@@ -29,15 +29,34 @@ const PUNCTUATION_RE = /[，。！？、,.!?…—\-""''()（）]/g;
 // isMeaningfulCue: the check is "does anything remain after removing filler
 // tokens", not "does this cue contain a filler token anywhere") - so is
 // "哎哟" ("ouch/oh no"), stripped via 哎 then 哟 leaving nothing.
-const CJK_FILLER_CHARS = ["啊", "嗯", "哦", "呃", "哎", "唉", "诶", "噢", "喔", "呀", "哇", "哼", "喂", "吓", "哟"];
+// 欸/誒 added alongside 诶 (same "hey/oh" sound, different Unicode variants
+// commonly produced by different auto-caption/ChatGPT-cleanup passes for the
+// identical spoken sound) and 嗷 (pain/surprise "ow") - not yet confirmed
+// against a real transcript the way the rest of this list was, but same
+// category (bare non-lexical reaction sound, not a content word or
+// grammatical particle) so same reasoning applies. Deliberately NOT adding
+// Cantonese sentence-final particles (咯/嘅/嘛/呢/㗎/喇/咩/咁/唔 etc.) even
+// though they're extremely common - those attach to and modify a content
+// word rather than standing alone as a bare reaction, and several double as
+// real content on their own (唔 = "not", 咩 = "what?", 咁 = "so/like that") -
+// stripping them risks silently eating real grammar/content, exactly what
+// this narrow-denylist design exists to avoid. Also deliberately NOT adding
+// 呵 (a soft "heh" chuckle) - treated the same as 哈哈 elsewhere in this
+// project's workflow: authentic laughter is a reaction worth keeping, not
+// disposable filler, and that call should stay consistent here.
+const CJK_FILLER_CHARS = ["啊", "嗯", "哦", "呃", "哎", "唉", "诶", "欸", "誒", "噢", "喔", "呀", "哇", "哼", "喂", "吓", "哟", "呦", "咦", "嗷"];
 
 // Romanized English filler/hesitation sounds. Matched on word boundaries
 // (\b), NOT as bare substrings - stripping "uh" as a substring would eat the
 // "uh" out of "huh" too (e.g. "uh huh" -> "uhhuh" -> strip "uh" twice ->
 // stray leftover "h"), which then looked like real English content and
 // wrongly forced the cue to be kept. Word-boundary matching only strips the
-// filler word itself, leaving genuine words like "huh" intact.
-const LATIN_FILLER_WORDS = ["um", "uh", "erm"];
+// filler word itself, leaving genuine words like "huh" intact. "ah"/"oh"/
+// "eh" included despite being common English words in other contexts (e.g.
+// "ah, I see") precisely because as a BARE standalone cue they're always the
+// non-lexical reaction reading, never a sentence needing that word - same
+// logic as "hmm"/"huh"/"hm" (hesitation/questioning sounds, not content).
+const LATIN_FILLER_WORDS = ["um", "uh", "erm", "hmm", "hm", "huh", "ah", "oh", "eh"];
 
 /** True unless `text` is empty/pure-filler after stripping punctuation and
  * known filler tokens. Defaults to true (meaningful) on anything ambiguous.

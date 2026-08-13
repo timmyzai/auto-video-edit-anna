@@ -201,6 +201,41 @@ count and which editor the user wants:
       outside what the current track covers, this can't recover it (that
       content is genuinely gone from the draft), same ceiling as the
       snapshot-restore path above.
+    - **Both scripts now refuse to run against a track/map with overlapping
+      source-footage references, via `lib/timeline.js`'s
+      `findOverlappingSourceRanges`.** Real incident that motivated this: a
+      "Rough Cut" track was resaved by Jianying itself (outside this tool's
+      control — most likely just from being opened in the app between
+      sessions) in a way that left 124 segment pairs for one source file
+      pointing at overlapping/duplicate spans of the same raw footage, with
+      the segment *count* unchanged (774 before and after) — nothing about
+      the count or the draft's own `duration` field revealed this,
+      `capcut tracks -H`'s displayed duration didn't either (it reads
+      `draft.duration`, not each segment's actual placement). Rebuilding a
+      raw-timeline-map from that track via `rebuild_raw_timeline_from_track.js`
+      silently inherited the corruption, and `insert_rough_cut.js` cloned
+      every overlapping pair, inflating the resulting video track to several
+      minutes longer than `keep_segments.json` called for (57 min of actual
+      placed content vs. the intended 49 min) — invisible until the user
+      opened the draft in Jianying and noticed the video was much longer than
+      the correctly-retimed caption track. Root-caused via the draft's own
+      `.capcut-cli-history` snapshots: the snapshot from the end of the prior
+      session had zero overlaps, the snapshot from the start of the next
+      session (before this tool touched anything) already had 124 — so the
+      corruption window is *between* sessions, not something either script
+      introduced on its own. `rebuild_raw_timeline_from_track.js` now checks
+      its rebuilt `rawTimeline` before writing it and throws with a report of
+      exactly which source file(s)/ranges collide; `insert_rough_cut.js`
+      checks a second time on load (defends against a stale/hand-edited map
+      too, not just ones from the recovery script) and a *third* time on the
+      video track it actually just built in memory, before `saveDraft()` is
+      ever called — catching this class of bug regardless of which step
+      introduced it, and failing loudly with nothing written rather than
+      silently producing a bloated draft. If either check trips, the fix is
+      the same as the "window has already closed" case above: find an earlier
+      clean snapshot (`capcut restore "<name>" --list`, then check a
+      candidate step's track for zero overlaps the same way before restoring
+      to it) rather than trusting the current track.
     - **Runs as one in-process pass**, not N subprocess calls: loads the
       draft once via `capcut-cli`'s public library exports (`loadDraft`/
       `saveDraft`/`findSegment`/`findMaterialGlobal`/`getTracksByType` — see
@@ -543,6 +578,93 @@ already mangled UTF-8 Chinese text here once). Then:
   Translate/cleanup via ChatGPT and reimport is still a manual step
   afterward if the user wants that, and so is `action-summary` — see its own
   section below.
+- **`--raw-timeline-map` MUST match the coordinate system `--dialogue-srt`'s
+  cue timestamps are actually in — this breaks silently, not loudly, if
+  mismatched.** The single-pass flow above assumes the auto-caption ran on
+  "the raw assembly" (i.e. before any insert), so cue timestamps are raw
+  (pre-cut) positions and `sources.json` (from `list_draft_sources.js`,
+  which maps raw-timeline position → source file) is the correct map. But if
+  a rough cut was **already inserted once** and the auto-caption was run on
+  *that* (already-compacted) sequence — e.g. doing a genuine two-pass
+  workflow (sound-only rough cut, then a second subtitle-informed rough cut
+  on top of it) — `dialogue_raw.srt`'s cue timestamps are CUT-timeline
+  positions, not raw ones, and `sources.json` no longer describes what they
+  mean. Confirmed hitting this directly: `sources.json`'s `findPieceIndex`
+  still "succeeds" for a cut-timeline position (it just resolves to whichever
+  raw segment happens to span that numeric offset, since a single raw file
+  can span a huge position range) so nothing errors — the union just silently
+  attributes cues to the *wrong* moment in the source file, drifting further
+  the more content upstream was already cut. In one real case this inflated
+  one clip's dialogue-driven keep percentage from a plausible ~57% to a
+  physically-implausible 98% while leaving sibling clips untouched — the
+  giveaway was per-clip kept-percentages diverging wildly from each other
+  with no content reason, confirmed as a bug (not genuinely continuous
+  dialogue) by cross-checking one cue's resolved source position against the
+  same file's `sources_from_track.json` (see below) and finding a
+  multi-minute discrepancy. **For a second-pass run, regenerate the map from
+  the *current* track first** — `jianying/rebuild_raw_timeline_from_track.js
+  --draft-name "<name>" --track-name "Rough Cut" --out
+  projects/<project>/sources_from_track.json` (same recovery-path script
+  used for the one-shot-window-closed case) — and pass **that** file as
+  `--raw-timeline-map` to `classify.js`'s `--dialogue-srt` call and every
+  later step that also takes `--raw-timeline-map`
+  (`apply_filler_exclusions.js`, `build_repetition_manifest.js`,
+  `apply_repetition_decisions.js`, `build_semantic_review_manifest.js`,
+  `apply_semantic_decisions.js`, `qa_transcript_report.js`) — not
+  `sources.json`, even though `sources.json` still exists and doesn't error.
+  A cheap sanity check before trusting a dialogue-safety-net run: per-clip
+  kept percentages should land in a similar range to each other and to the
+  amplitude-only baseline, not vary wildly — a big, lopsided jump on just one
+  clip is the signature of this exact bug, not a real content difference.
+- **`sources_from_track.json` must always be rebuilt from the SAME track
+  layout `--dialogue-srt` was exported against — not just "the current
+  track."** `dialogue_raw.srt`'s cue timestamps are cut-timeline positions
+  frozen at export time (whatever the "Rough Cut" track's internal
+  compaction was *then*). If the track gets rebuilt again afterward — e.g. a
+  gap-fix intersect-and-reinsert cycle, which shortens/repacks the timeline —
+  rebuilding `sources_from_track.json` from *that later* state and reusing
+  the *same, older* `dialogue_raw.srt` silently mixes two different
+  coordinate systems: cue position 1500s meant something specific on the
+  920-segment track dialogue_raw.srt was captured against, and means
+  something else on a shorter, differently-repacked 961-segment track.
+  Confirmed concretely: reusing the same `qa_transcript_report.js` inputs
+  except for which track `sources_from_track.json` came from changed the
+  FLAGGED count from 433 to 682 for the exact same underlying content (total
+  flagged duration barely moved, 61.9s -> 70.3s - the extra 249 were real,
+  just previously mis-resolved to "looks kept" by the coordinate mismatch,
+  not a new problem). **The fix is always to rebuild from the track state
+  that existed at `--dialogue-srt` export time**, not whatever the track
+  happens to be right now — if that state isn't the live draft anymore,
+  restore to the matching snapshot first (`capcut restore ... --list`, then
+  check each candidate's video AND text track segment counts, not just
+  video - the right snapshot has both the original video layout *and* the
+  caption track already on it).
+- **Even with the map fixed, a second-pass insert can still leave silent
+  gaps in the timeline — a different, structural issue, not a bug to patch
+  around.** `classify.js`'s `--dialogue-srt` safety net runs against the
+  *original* raw audio each time, independent of what a prior insert already
+  kept — so on a second pass it can legitimately want to keep a moment that
+  the *first* insert already discarded from the draft. That footage is
+  genuinely gone (the clone-and-consolidate mechanism removes originals as it
+  clones them — see the mechanism note above), so `insert_rough_cut.js`
+  clones whatever sub-piece *does* still exist and simply leaves a hole where
+  it doesn't, rather than erroring — confirmed directly: 889 sub-second gaps
+  totaling ~9% of one real cut's runtime, invisible to the segment-count/
+  overlap checks (no duplicated or overlapping content, just genuine missing
+  stretches) and only surfaced by comparing the sum of every segment's own
+  `target_timerange.duration` against the track's overall `maxEnd` — equal
+  means no gaps, sum-short-of-maxEnd means gaps that size. **Fix before
+  inserting, not after**: intersect the second pass's `keep_segments.json`
+  against the union of source ranges the current track's
+  `sources_from_track.json` actually covers (per clip), clipping away
+  anything outside it — this reuses the identical containment check
+  `resolvePieceToSegments()` already does internally, just run once up front
+  so every piece resolves to complete coverage instead of a partial one that
+  leaves a hole. The clipped-away seconds are exactly the cues that will
+  legitimately show up as new FLAGGED entries in the next
+  `qa_transcript_report.js` run (content the user's dialogue-aware pass
+  wanted but the first insert had already discarded) — expected and
+  explainable by this mechanism, not a fresh bug to chase.
 - **QA the result with `silence_classifier/qa_transcript_report.js`** once
   you have a dialogue SRT — run it **before** `insert_rough_cut.js` (step 6),
   against `keep_segments.json` directly, so any fix is a cheap JSON edit

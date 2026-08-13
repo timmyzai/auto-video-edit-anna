@@ -56,7 +56,7 @@ import cliProgress from "cli-progress";
 import { findDraft, loadDraft, saveDraft, findSegment, findMaterialGlobal, getTracksByType } from "capcut-cli";
 
 import { detectDraftFolder, capcutBinPath, projectDir } from "./lib/draft_folder.js";
-import { buildPieceBounds, findPieceIndex, indexBySourceClip, overlappingEntries, sourceClipKey } from "../lib/timeline.js";
+import { buildPieceBounds, findPieceIndex, indexBySourceClip, overlappingEntries, sourceClipKey, findOverlappingSourceRanges, formatOverlapReport } from "../lib/timeline.js";
 
 // --force/--dry-run are pure switches (no following value) - naively
 // consuming argv[i+1] for every flag would eat the NEXT flag's name as this
@@ -185,6 +185,24 @@ function main() {
       `(current version) against this draft to regenerate it.`
     );
   }
+  // Refuse a raw-timeline-map whose own entries already reference
+  // overlapping source footage - resolvePieceToSegments would happily clone
+  // every overlapping match, silently duplicating content in the output. See
+  // lib/timeline.js's findOverlappingSourceRanges header for the real
+  // incident this guards against (a "Rough Cut" track resaved outside this
+  // tool's control, then fed back in via rebuild_raw_timeline_from_track.js).
+  const inputOverlaps = findOverlappingSourceRanges(rawTimeline);
+  if (inputOverlaps.length > 0) {
+    throw new Error(
+      `${args.rawTimelineMap} has overlapping/duplicate source-footage references - refusing to build ` +
+      `a cut from it, this would silently clone duplicate content:\n${formatOverlapReport(inputOverlaps)}\n` +
+      `If this came from jianying/rebuild_raw_timeline_from_track.js, the track it read is itself ` +
+      `corrupted (that script now checks for this too - re-run it to see the same report). Otherwise ` +
+      `regenerate this file (list_draft_sources.js for a fresh import, rebuild_raw_timeline_from_track.js ` +
+      `for a recovery) against the current draft state before retrying.`
+    );
+  }
+
   const rawTimelineBySource = indexBySourceClip(rawTimeline);
   const piecesBySource = indexBySourceClip(pieces);
 
@@ -261,6 +279,31 @@ function main() {
       `${unmatchedPieces[0].sourceClip}@${unmatchedPieces[0].sourceStart.toFixed(2)}-${unmatchedPieces[0].sourceEnd.toFixed(2)}s). ` +
       `This means keep_segments.json and --raw-timeline-map disagree about the source footage - regenerate both ` +
       `against the current draft before retrying. Nothing has been written yet.`
+    );
+  }
+
+  // Defense in depth, independent of the input-map check above: verify the
+  // TRACK ACTUALLY JUST BUILT doesn't itself contain overlapping clones -
+  // catches this class of corruption regardless of mechanism, before a
+  // single byte is written. Resolves each clone's real source_timerange
+  // (microseconds) back to seconds against its material's path, the same
+  // shape findOverlappingSourceRanges expects.
+  const builtRanges = finalVideoTrack.segments.map((seg) => {
+    const mat = findMaterialGlobal(draft, seg.material_id);
+    return {
+      sourceClip: mat?.material?.path ?? seg.material_id,
+      sourceStart: usToS(seg.source_timerange.start),
+      sourceEnd: usToS(seg.source_timerange.start + seg.source_timerange.duration),
+    };
+  });
+  const builtOverlaps = findOverlappingSourceRanges(builtRanges);
+  if (builtOverlaps.length > 0) {
+    throw new Error(
+      `The video track just built from ${args.keepSegments} contains overlapping/duplicate footage - ` +
+      `refusing to write it. Nothing has been written yet.\n${formatOverlapReport(builtOverlaps)}\n` +
+      `This shouldn't be reachable if the --raw-timeline-map check above passed - if you see this, ` +
+      `something in resolvePieceToSegments() or keep_segments.json itself produced overlapping pieces; ` +
+      `investigate before retrying rather than re-running as-is.`
     );
   }
 
