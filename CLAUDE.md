@@ -646,25 +646,81 @@ already mangled UTF-8 Chinese text here once). Then:
   hold") scores *higher* on lexical overlap than genuine restatement
   ("现在不用给钱了" → "现在每个月免费", 0.167). Same root cause as the
   exact-repeat rules-only pass above: a text-similarity heuristic can't tell
-  "restating the same point" from "continuing the point with more words."
-  There is currently no mechanical substitute for reading the transcript for
-  meaning — for a long transcript (a few hundred cues or more), split it into
-  overlapping chunks (~20-25 cue overlap, so a pair straddling a chunk
-  boundary isn't missed by either side) and delegate to a handful of
-  background Agents, same scale guidance as the repetition manifest above;
-  merge results and cross-check the overlap zone against the source
-  transcript directly (agents *will* occasionally misattribute a timecode to
-  the wrong adjacent line when two similar cues sit close together — caught
-  this exact error twice on a real run by re-reading the raw cue lines
-  before trusting the agents' reported timecodes). Confirmed candidates get
-  written into the same `repetition_manifest.json` schema with
-  `"pattern": "paraphrase_repeat"` — `apply_repetition_decisions.js` treats
-  this pattern identically to `exact_duplicate` (keeps the first occurrence,
-  cuts the reworded repeat(s)), since the underlying edit decision is the
-  same: multiple distinct-worded cues asserting one fact, only the first
-  needs to survive.
+  "restating the same point" from "continuing the point with more words" —
+  there is no mechanical substitute for reading the transcript for meaning.
+  **This is now folded into the broader semantic-review pass below**, rather
+  than handled as its own chunked, ad hoc effort — see "Semantic review
+  (INCLUDE/EXCLUDE/REVIEW)".
 
-- **`subtractSpan`-based edits (repetition/paraphrase/filler cuts) can strand
+- **Semantic review (INCLUDE/EXCLUDE/REVIEW): one consolidated Sonnet pass
+  over whatever's left after the mechanical passes above, not a chunked
+  paraphrase-only effort.** Paraphrase redundancy, false starts, corrections,
+  mistakes, irrelevant conversation, production/setup speech, and
+  continuity-context judgment all need the same thing a text-similarity
+  heuristic can't provide — actually reading the cue for meaning — so they're
+  handled together, in one pass, rather than as separate ad hoc efforts.
+  `silence_classifier/build_semantic_review_manifest.js` (mechanical only —
+  reuses `isMeaningfulCue`/timeline helpers, no judgment) enumerates every
+  currently-kept meaningful cue — i.e. it runs *after* filler exclusion and
+  repetition-manifest application, so it only ever sees content those
+  mechanical passes didn't already resolve — into a flat manifest,
+  `projects/<project>/semantic_review.json` (deliberately its own file, not
+  `repetition_manifest.json`: a semantic entry is one cue/one span, not a
+  multi-occurrence pattern, and its decision needs to survive indefinitely
+  rather than being cheaply rediscoverable by a fresh scan the way exact-
+  duplicate detection is — see the script's own header for the carry-forward-
+  by-cue-identity mechanism that makes re-runs only surface genuinely new
+  cues). **Claude reads that manifest directly (Read tool) and fills in
+  `"category"` (a short free-text label — `"false_start"`, `"correction"`,
+  `"irrelevant_chat"`, `"production_speech"`, `"paraphrase_repeat"`,
+  `"continuity_context"`, or anything else that actually fits — not a fixed
+  enum) + `"decision"` (`"include"` | `"exclude"` | `"review"`) + `"reason"`
+  per entry, same discipline as the repetition manifest.
+  `silence_classifier/apply_semantic_decisions.js` then applies every
+  `"exclude"` (cuts that one span — no "keep the first occurrence" logic
+  needed, unlike repetition's `exact_duplicate`, since every entry here is
+  already a single cue) and auto-prunes any stranded sub-`min_segment_
+  duration_ms` sliver left behind, same mechanism as
+  `apply_repetition_decisions.js` below.
+  **`"review"` is never auto-cut** — an entry decided `"review"` is left in
+  `keep_segments.json` exactly as it was; the manifest itself (any entry with
+  `decision: "review"`) *is* the review list, so there's no separate file
+  that can drift out of sync with it.
+  **Default is one manifest, not chunked** — the old `semantic_review_chunk_
+  *.json` approach (splitting the transcript into N overlapping pieces, each
+  read by a separate agent) is retired as the default: a background Agent
+  spawn pays its own cold-start context tax regardless of the chunk's actual
+  size, so for a transcript that fits one Sonnet turn, chunking costs *more*
+  total tokens than a single pass, not less. Confirmed on this real project:
+  the full post-mechanical-pass manifest was 1353 cues / 11,412 characters —
+  comfortably one pass. The builder script prints entry/character counts on
+  every write specifically so this is a judgment call made with real numbers,
+  not a guess; there is deliberately no hardcoded cue-count/char-count
+  threshold. If a transcript is ever genuinely too large for one pass, the
+  fallback is the same manual, ad hoc split (read the manifest, divide it by
+  hand across a couple of Read/Write passes or background Agents) that
+  existed before this script did — not new code, since baking in an
+  arbitrary number now would be guessing, not measuring. Usage:
+  `node silence_classifier/build_semantic_review_manifest.js --keep-segments
+  projects/<project>/keep_segments.json --dialogue-srt
+  projects/<project>/dialogue_raw.srt --raw-timeline-map
+  projects/<project>/sources.json --out
+  projects/<project>/semantic_review.json`, then fill in the manifest, then
+  `node silence_classifier/apply_semantic_decisions.js --manifest
+  projects/<project>/semantic_review.json --keep-segments
+  projects/<project>/keep_segments.json --out
+  projects/<project>/keep_segments.json --dialogue-srt
+  projects/<project>/dialogue_raw.srt --raw-timeline-map
+  projects/<project>/sources.json`. Run this **after** the repetition
+  workflow above and **before** the final `qa_transcript_report.js` sanity
+  check (pass it `--semantic-manifest projects/<project>/semantic_review.json`
+  alongside `--repetition-manifest` so an excluded semantic cue is recognized
+  as an explained cut rather than misreported as a bug), which runs
+  **before** `insert_rough_cut.js` (step 6) — same "cheap JSON edit now,
+  not an already-inserted-draft redo later" reasoning as everywhere else in
+  this workflow.
+
+- **`subtractSpan`-based edits (repetition/paraphrase/filler/semantic cuts) can strand
   near-zero-duration silent slivers that never went through
   `min_segment_duration_ms` filtering.** That floor only runs once, inside
   `classify.js`, before any of these later cuts exist — if a cut's boundary
@@ -676,14 +732,15 @@ already mangled UTF-8 Chinese text here once). Then:
   sitting in `keep_segments.json` undetected until directly measured (the
   existing QA tooling doesn't check kept-span RMS, only cut-vs-meaningful
   overlap, so this class of bug is invisible to `qa_transcript_report.js`).
-  Both `apply_repetition_decisions.js` and `apply_filler_exclusions.js` now
-  auto-prune these afterward, reusing `classify.js`'s own
-  `filterShortSpans` with `dialogue_filter.js`'s `meaningfulCueSourceSpans`
-  as the protected-span check — the identical protection logic
-  `classify.js` used originally, so this can only ever remove artifacts,
-  never real content. For `apply_repetition_decisions.js` this requires the
-  optional `--dialogue-srt`/`--raw-timeline-map` flags (omit both to skip
-  pruning entirely, unchanged behavior); `apply_filler_exclusions.js`
+  `apply_repetition_decisions.js`, `apply_filler_exclusions.js`, and
+  `apply_semantic_decisions.js` all auto-prune these afterward, reusing
+  `classify.js`'s own `filterShortSpans` with `dialogue_filter.js`'s
+  `meaningfulCueSourceSpans` as the protected-span check — the identical
+  protection logic `classify.js` used originally, so this can only ever
+  remove artifacts, never real content. For `apply_repetition_decisions.js`
+  and `apply_semantic_decisions.js` this requires the optional
+  `--dialogue-srt`/`--raw-timeline-map` flags (omit both to skip pruning
+  entirely, unchanged behavior); `apply_filler_exclusions.js`
   already requires those flags for its main job, so pruning there is
   automatic. Not a substitute for `qa_transcript_report.js` — that still
   catches content-level problems (filler-kept, meaningful-cut); this only
@@ -770,9 +827,38 @@ node jianying/insert_rough_cut.js --draft-name "..." --keep-segments projects/<n
 # above instead of running it plain:
 #   --dialogue-srt <Jianying auto-caption SRT, uncleaned> --raw-timeline-map projects/<name>/sources.json
 # (capcut export-srt "<draft>" first if it's still a text track, not a file)
+
+# Deterministic checks first - filler, then repetition (see CLAUDE.md's
+# "Content-aware cutting" section for the full workflow of each):
+node silence_classifier/apply_filler_exclusions.js --keep-segments projects/<name>/keep_segments.json \
+  --dialogue-srt projects/<name>/dialogue_raw.srt --raw-timeline-map projects/<name>/sources.json \
+  --out projects/<name>/keep_segments.json
+node silence_classifier/build_repetition_manifest.js --keep-segments projects/<name>/keep_segments.json \
+  --dialogue-srt projects/<name>/dialogue_raw.srt --raw-timeline-map projects/<name>/sources.json \
+  --out projects/<name>/repetition_manifest.json
+# ... fill in decision/reason directly, then:
+node silence_classifier/apply_repetition_decisions.js --manifest projects/<name>/repetition_manifest.json \
+  --keep-segments projects/<name>/keep_segments.json --out projects/<name>/keep_segments.json \
+  --dialogue-srt projects/<name>/dialogue_raw.srt --raw-timeline-map projects/<name>/sources.json
+
+# THEN one consolidated semantic pass over whatever's left (paraphrase
+# redundancy, false starts, corrections, mistakes, irrelevant chat,
+# production speech, continuity context) - one manifest, not chunked, by
+# default (see CLAUDE.md's "Semantic review" section for the threshold-free
+# reasoning):
+node silence_classifier/build_semantic_review_manifest.js --keep-segments projects/<name>/keep_segments.json \
+  --dialogue-srt projects/<name>/dialogue_raw.srt --raw-timeline-map projects/<name>/sources.json \
+  --out projects/<name>/semantic_review.json
+# ... fill in category/decision ("include"|"exclude"|"review")/reason directly, then:
+node silence_classifier/apply_semantic_decisions.js --manifest projects/<name>/semantic_review.json \
+  --keep-segments projects/<name>/keep_segments.json --out projects/<name>/keep_segments.json \
+  --dialogue-srt projects/<name>/dialogue_raw.srt --raw-timeline-map projects/<name>/sources.json
+
 # QA BEFORE inserting - review/fix keep_segments.json while it's still cheap:
 node silence_classifier/qa_transcript_report.js --keep-segments projects/<name>/keep_segments.json \
   --dialogue-srt projects/<name>/dialogue_raw.srt --raw-timeline-map projects/<name>/sources.json \
+  --repetition-manifest projects/<name>/repetition_manifest.json \
+  --semantic-manifest projects/<name>/semantic_review.json \
   --out-dir projects/<name>
 # writes excluded_review.txt (filler-only cues kept anyway - candidates to
 # cut, plus a FLAGGED section if a meaningful cue ended up in a cut span,

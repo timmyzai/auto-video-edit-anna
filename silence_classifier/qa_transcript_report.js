@@ -49,15 +49,20 @@
 //     --dialogue-srt <raw-timeline SRT> --raw-timeline-map sources.json \
 //     [--out-dir projects/<name>] [--repetition-manifest repetition_manifest.json]
 //
-// --repetition-manifest is optional context, not a requirement: once
-// build_repetition_manifest.js/apply_repetition_decisions.js have deliberately
-// cut some meaningful cues (real content, trimmed for redundancy - see that
-// pair's own header), those cues WILL show up as "meaningful content in a cut
-// span" here, because they are - that's no longer a bug signature on its own.
-// Passing the filled manifest back in lets this script tell "explained by a
-// deliberate repetition-trim decision" apart from "genuinely unexplained,
+// --repetition-manifest and --semantic-manifest are both optional context,
+// not a requirement: once build_repetition_manifest.js/
+// apply_repetition_decisions.js or build_semantic_review_manifest.js/
+// apply_semantic_decisions.js have deliberately cut some meaningful cues
+// (real content, trimmed on purpose - see those pairs' own headers), those
+// cues WILL show up as "meaningful content in a cut span" here, because they
+// are - that's no longer a bug signature on its own. Passing the filled
+// manifest(s) back in lets this script tell "explained by a deliberate
+// repetition/semantic-review decision" apart from "genuinely unexplained,
 // investigate this", instead of the FLAGGED section crying wolf on every
-// intentional edit.
+// intentional edit. The two manifests use different vocab/shapes by design
+// (repetition_manifest.json: occurrences[], pattern, decision "cut";
+// semantic_review.json: flat single span, decision "exclude") - both are
+// normalized into the same flat span list below.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -76,24 +81,33 @@ function parseArgs(argv) {
   if (!out.keepSegments || !out.dialogueSrt || !out.rawTimelineMap) {
     throw new Error(
       "Usage: qa_transcript_report.js --keep-segments <path> --dialogue-srt <raw-timeline srt> " +
-      "--raw-timeline-map <path> [--out-dir <dir>] [--repetition-manifest <path>]"
+      "--raw-timeline-map <path> [--out-dir <dir>] [--repetition-manifest <path>] [--semantic-manifest <path>]"
     );
   }
   return out;
 }
 
-// Spans that build_repetition_manifest.js/apply_repetition_decisions.js
-// deliberately cut (real content, trimmed for redundancy) - see that pair's
-// own "cut" semantics: exact_duplicate cuts every occurrence except the
-// first, intra_cue_repeat cuts the entire single occurrence.
-function loadDeliberateCutSpans(manifestPath) {
+// Spans that build_repetition_manifest.js/apply_repetition_decisions.js OR
+// build_semantic_review_manifest.js/apply_semantic_decisions.js deliberately
+// cut (real content, trimmed on purpose) - see those pairs' own "cut"/
+// "exclude" semantics: exact_duplicate cuts every occurrence except the
+// first, intra_cue_repeat cuts the entire single occurrence, a semantic
+// "exclude" entry cuts its one span. manifestPath/cutDecision let one
+// function serve both manifest shapes: repetition_manifest.json entries
+// carry occurrences[] + pattern and use decision "cut"; semantic_review.json
+// entries are already a flat single span and use decision "exclude".
+function loadDeliberateCutSpans(manifestPath, cutDecision) {
   if (!manifestPath) return [];
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
   const spans = [];
   for (const entry of manifest) {
-    if (entry.decision !== "cut") continue;
-    const toCut = entry.pattern === "exact_duplicate" ? entry.occurrences.slice(1) : entry.occurrences;
-    for (const occ of toCut) spans.push(occ);
+    if (entry.decision !== cutDecision) continue;
+    if (entry.occurrences) {
+      const toCut = entry.pattern === "exact_duplicate" ? entry.occurrences.slice(1) : entry.occurrences;
+      for (const occ of toCut) spans.push(occ);
+    } else {
+      spans.push({ clip: entry.clip, srcStart: entry.srcStart, srcEnd: entry.srcEnd });
+    }
   }
   return spans;
 }
@@ -144,7 +158,10 @@ function main() {
 
   const { rawTimeline } = JSON.parse(fs.readFileSync(args.rawTimelineMap, "utf-8"));
   const cues = parseSrtFile(args.dialogueSrt);
-  const deliberateCutSpans = loadDeliberateCutSpans(args.repetitionManifest);
+  const deliberateCutSpans = [
+    ...loadDeliberateCutSpans(args.repetitionManifest, "cut"),
+    ...loadDeliberateCutSpans(args.semanticManifest, "exclude"),
+  ];
   const isDeliberateCut = (clip, srcStart, srcEnd) =>
     deliberateCutSpans.some((s) => s.clip === clip && s.srcStart < srcEnd && s.srcEnd > srcStart);
 
@@ -207,8 +224,8 @@ function main() {
     ),
     "",
     ...(explainedCuts.length > 0 ? [
-      `=== Explained: meaningful content cut deliberately via repetition review (${explainedCuts.length}) ===`,
-      `Not a bug - see --repetition-manifest's "reason" per entry for why each was trimmed.`,
+      `=== Explained: meaningful content cut deliberately via repetition/semantic review (${explainedCuts.length}) ===`,
+      `Not a bug - see the matching --repetition-manifest or --semantic-manifest entry's "reason" for why each was trimmed.`,
       "",
       ...explainedCuts.map((f) =>
         `[CUT] "${f.text}"  (${f.clip} @ ${f.srcStart.toFixed(2)}-${f.srcEnd.toFixed(2)}s)\n    context: ${f.context}`

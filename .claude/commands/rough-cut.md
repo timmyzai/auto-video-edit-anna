@@ -40,6 +40,14 @@ path, not a further optional step** — run it before `insert_rough_cut.js`,
 against `keep_segments.json`, and actually look at what it flags (especially
 the "meaningful content in a cut span" section — that should always be empty;
 investigate before proceeding if it isn't) before inserting into the draft.
+That same section also documents filler exclusion, repetition review, and a
+consolidated semantic-review pass (INCLUDE/EXCLUDE/REVIEW judgment over
+whatever's left after those) as further, still-optional cleanup once a
+dialogue SRT exists — only run them if the user wants that deeper a pass, in
+that order (deterministic filler/repetition first, semantic review last, all
+before the `qa_transcript_report.js` check above), and never chunk the
+semantic-review manifest by default — only if its own printed size genuinely
+warrants it.
 
 When reporting results, mention briefly that this content-aware safety net
 and the separate, optional `action-summary` command both exist if the user
