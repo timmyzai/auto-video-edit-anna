@@ -65,6 +65,7 @@ import path from "node:path";
 import { parseSrtFile } from "../lib/srt.js";
 import { loadPcmFloat32, VAD_SAMPLE_RATE } from "./extract_audio.js";
 import { buildPieceBounds, findPieceIndex, indexBySourceClip, overlappingEntries, sourceClipKey } from "../lib/timeline.js";
+import { withStage } from "../lib/pipeline_progress.js";
 
 const DIGIT_RUN_RE = /^[\d,.]+$/;
 const REPEAT_RE = /(.{1,3})\1{2,}/u;
@@ -120,7 +121,11 @@ function rmsPct(samples, sampleRate, startS, endS) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const progressPath = path.join(path.dirname(path.resolve(args.out)), "pipeline_progress.json");
+  withStage(progressPath, "repetition_build", () => runBuild(args));
+}
 
+function runBuild(args) {
   const clips = JSON.parse(fs.readFileSync(args.keepSegments, "utf-8"));
   const { pieces } = buildPieceBounds(clips);
   const keptBySource = indexBySourceClip(pieces);

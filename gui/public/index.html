@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Rough Cut Dashboard</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header>
+  <h1>Rough Cut Dashboard</h1>
+  <p class="subtitle">Core rough-cut pipeline: resolve draft &rarr; suggest threshold &rarr; classify &rarr; insert.</p>
+</header>
+
+<section id="project-picker" class="card">
+  <h2>Project</h2>
+  <div class="row">
+    <input id="draft-name-input" type="text" placeholder="Jianying draft name" />
+    <button id="open-project-btn">Open / Resume</button>
+  </div>
+  <div id="resume-list"></div>
+</section>
+
+<main id="steps" class="hidden">
+
+  <section class="card step" data-stage="resolve_draft">
+    <div class="step-header">
+      <h2>1. Resolve Draft &amp; Sources</h2>
+      <span class="badge" data-badge="resolve_draft">not started</span>
+    </div>
+    <p class="hint">Reads the existing Jianying draft and its already-imported source files. Never creates a new draft.</p>
+    <div class="row">
+      <label>Track index (only needed if the draft has multiple video tracks):
+        <input id="track-index-input" type="number" min="0" style="width:4em" />
+      </label>
+      <button id="resolve-draft-btn">Resolve Draft</button>
+    </div>
+    <div id="track-ambiguity-warning" class="warning hidden">
+      Multiple video tracks were found and one was auto-picked, which can be wrong (e.g. after a prior rough cut).
+      Check the output below, set the correct track index above, and re-run this step if needed.
+    </div>
+    <pre class="output" data-output="resolve_draft"></pre>
+  </section>
+
+  <section class="card step" data-stage="suggest_threshold">
+    <div class="step-header">
+      <h2>2. Suggest Thresholds</h2>
+      <span class="badge" data-badge="suggest_threshold">not started</span>
+    </div>
+    <p class="hint">Suggests a starting per-clip amplitude threshold. Treat it as a starting point, not gospel.</p>
+    <button id="suggest-threshold-btn" disabled>Suggest Thresholds</button>
+    <pre class="output" data-output="suggest_threshold"></pre>
+  </section>
+
+  <section class="card step" data-stage="classify_amplitude">
+    <div class="step-header">
+      <h2>3. Classify (Sound-Only)</h2>
+      <span class="badge" data-badge="classify_amplitude">not started</span>
+    </div>
+    <p class="hint">Edit thresholds below if needed (one per source file), then run classification.</p>
+    <div id="threshold-inputs"></div>
+    <button id="classify-btn" disabled>Run Classification</button>
+    <div class="progress-bar hidden" data-progress="classify_amplitude">
+      <div class="progress-fill"></div>
+      <span class="progress-label"></span>
+    </div>
+    <pre class="output" data-output="classify_amplitude"></pre>
+    <div id="results-summary" class="hidden">
+      <h3>Results</h3>
+      <div id="results-numbers"></div>
+      <div id="fragmented-warning" class="warning hidden">
+        Segments look over-fragmented (average well under 1s). Consider lowering thresholds and re-running classification.
+      </div>
+      <label><input type="checkbox" id="reviewed-checkbox" /> I reviewed these numbers</label>
+    </div>
+  </section>
+
+  <section class="card step" data-stage="insert">
+    <div class="step-header">
+      <h2>4. Insert Rough Cut</h2>
+      <span class="badge" data-badge="insert">not started</span>
+    </div>
+    <div id="jianying-status" class="warning">Checking whether Jianying is running&hellip;</div>
+    <div class="row">
+      <label><input type="checkbox" id="force-checkbox" /> Force (replace an existing "Rough Cut" track)</label>
+      <label><input type="checkbox" id="dry-run-checkbox" /> Dry run (preview only, no write)</label>
+    </div>
+    <button id="insert-btn" disabled>Insert Rough Cut</button>
+    <div class="progress-bar hidden" data-progress="insert">
+      <div class="progress-fill"></div>
+      <span class="progress-label"></span>
+    </div>
+    <pre class="output" data-output="insert"></pre>
+    <div id="insert-complete" class="hidden success">
+      Insert complete. Open Jianying, review the cut track, and export manually when ready &mdash; this tool does not export for you.
+    </div>
+  </section>
+
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

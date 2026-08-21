@@ -438,13 +438,88 @@ assumed) — irrelevant to the current split-track design (every SRT this
 pipeline produces now is single-line-per-cue), but worth knowing if a future
 change reintroduces multi-line cues.
 
+## Pipeline progress tracking
+
+**One file per project, `projects/<name>/pipeline_progress.json`, every
+stage of both rough-cut passes writes into — not N separate progress files
+with different shapes.** Built (see `lib/pipeline_progress.js`) after
+`insert_rough_cut.js`'s own one-off `rough_cut_progress.json` mechanism
+turned out to be exactly the wrong shape once a second pass existed: it only
+ever tracked "the current insert," with no notion of stages before or after
+it, so there was no single place to see "where is this run in the whole
+flow" — just "how far along is whichever insert happens to be running right
+now."
+
+`lib/pipeline_progress.js`'s `CANONICAL_STAGES` is the single source of
+truth for what stages exist and in what order — the whole flow, laid out
+explicitly rather than left implicit in script-calling-order:
+
+```
+rough_cut_1: resolve_draft -> suggest_threshold -> classify_amplitude -> insert_1
+rough_cut_2: export_captions -> classify_dialogue -> filler_exclusion ->
+             repetition_build -> repetition_review -> repetition_apply ->
+             semantic_build -> semantic_review -> semantic_apply ->
+             qa_report -> rebuild_raw_map -> insert_2
+```
+
+`jianying/list_draft_sources.js` (always the first script of a fresh run)
+calls `initPipeline()` with just the `rough_cut_1` stages — a caption-free
+run never shows the `rough_cut_2` stages as perpetually "pending" because
+they were never declared. If the dialogue-aware add-on gets used later in
+the same session, whichever script starts it calls `ensureStagesPresent()`
+to append the `rough_cut_2` stages onto the *same* file without touching
+`rough_cut_1`'s already-completed history — this is deliberately additive,
+not a fresh `initPipeline()` call, which would wipe that history instead.
+
+**Every mechanical CLI script in both passes wraps its own work in
+`withStage(progressPath, stageId, fn)`** (start → run → complete, or fail →
+rethrow on an exception) — `classify.js`, `apply_filler_exclusions.js`,
+`build_repetition_manifest.js`, `apply_repetition_decisions.js`,
+`build_semantic_review_manifest.js`, `apply_semantic_decisions.js`,
+`qa_transcript_report.js`, `rebuild_raw_timeline_from_track.js`, and
+`suggest_threshold.js` (only when given `--draft-name`; it's also used
+standalone for the Premiere path, which has no `projects/` folder to report
+into). `insert_rough_cut.js` calls the four pieces (`startStage`/
+`updateStageProgress`/`completeStage`/`failStage`) directly instead of using
+`withStage`, since it needs mid-run chunk updates (segment-by-segment, same
+cadence its own terminal progress bar already used) and different handling
+for `--dry-run` (updates progress but deliberately does NOT `completeStage`
+— a dry run previewed the work, it didn't finish it) — and picks `insert_1`
+vs `insert_2` by whether a same-named track already existed before this run,
+a display label only, not a behavior change.
+
+**`repetition_review` and `semantic_review` have no dedicated script — they
+ARE Claude's own manifest-reading passes.** There's no mechanical work to
+wrap, so report chunk progress directly from the CLI while working through
+a manifest in pieces:
+```bash
+node lib/pipeline_progress.js start projects/<name>/pipeline_progress.json semantic_review --total 9
+# ...after reading/deciding each chunk...
+node lib/pipeline_progress.js update projects/<name>/pipeline_progress.json semantic_review --done 3 --note "chunk 3 of 9"
+# ...
+node lib/pipeline_progress.js complete projects/<name>/pipeline_progress.json semantic_review
+```
+`export_captions` (the manual `capcut export-srt` step) has no script either
+— it's fast/single-shot enough that a bare `start`+`complete` pair around it
+is enough, no chunk tracking needed.
+
+**Viewing progress**: `node jianying/show_progress.js --draft-name "<name>"`
+for a one-shot snapshot, or add `--watch` (`--interval-s N` to change the
+3s default refresh) for a live-updating view while a long stage runs —
+this is what to point the user at instead of guessing progress from elapsed
+time. Each stage line shows its status icon (◻ pending / ⏳ running / ✅ done
+/ ❌ failed / ➖ skipped), chunk progress and percentage where applicable,
+and either an ETA (linear extrapolation from elapsed-time/chunks-done, once
+a stage has at least one chunk of history to extrapolate from) or the actual
+elapsed-time-to-completion once a stage finishes.
+
 ## Autonomous rough-cut workflow (when the user gives you a Jianying project)
 
 **No `raw/` or `output/` folder in this workflow.** Raw footage always lives
 inside a Jianying project the user built themselves through Jianying's own
 GUI — our tooling classifies it in place and never copies it anywhere.
 Generated files (`sources.json`, `keep_segments.json`,
-`rough_cut_progress.json`, and anything else this workflow or the optional
+`pipeline_progress.json`, and anything else this workflow or the optional
 add-ons produce) go into **`projects/<draft-name>/`** — one folder per
 project, entirely gitignored. `jianying/list_draft_sources.js` creates that
 folder (it's the first script that runs), everything after it writes into the
@@ -526,10 +601,13 @@ to type or paste any commands:
    this step — see the dialogue safety net below for how to also feed it
    into classification), its cues are remapped onto the same compacted
    timeline in this same pass — no separate step needed for that. Writes
-   live progress to `projects/<project>/rough_cut_progress.json`
-   periodically (`segmentsDone`/`segmentsTotal`, `percent`, `status`) — for a
-   long insert, point the user at that file (or read it yourself) instead of
-   guessing progress from elapsed time.
+   live progress into `projects/<project>/pipeline_progress.json`
+   periodically under its own stage (`insert_1` first time, `insert_2` on a
+   subsequent pass) — see "Pipeline progress tracking" below for the shared
+   mechanism every stage of this workflow reports through; for a long
+   insert, run `node jianying/show_progress.js --draft-name "<project>"
+   --watch` (or read the file yourself) instead of guessing progress from
+   elapsed time.
 7. Report results: segment count, total kept duration, and (if a caption
    track was present) how many cues were remapped vs. dropped for falling
    entirely in a cut gap. Export is the user's one remaining manual step.
@@ -938,8 +1016,9 @@ node jianying/insert_rough_cut.js --draft-name "..." --keep-segments projects/<n
   --raw-timeline-map projects/<name>/sources.json
 # clones each kept span from its original segment (preserves GUI-applied
 # grading/effects) and remaps an existing caption track onto the compacted
-# timeline in the same pass, if the draft has one. progress:
-# projects/<name>/rough_cut_progress.json. --force to replace a same-named
+# timeline in the same pass, if the draft has one. live progress:
+# node jianying/show_progress.js --draft-name "..." --watch (reads
+# projects/<name>/pipeline_progress.json). --force to replace a same-named
 # track from a prior run; --dry-run to preview without writing.
 # then manually: export in Jianying
 

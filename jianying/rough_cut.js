@@ -13,6 +13,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { isJianyingRunning } from "./lib/draft_folder.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
@@ -64,9 +66,7 @@ function ensureFfmpegOnPath() {
 // that's discovered only after classify+QA already ran (multi-minute jobs on real
 // footage) - check up front so a closed-Jianying mistake costs seconds, not minutes.
 function ensureJianyingClosed() {
-  if (process.platform !== "win32") return;
-  const result = spawnSync("tasklist", ["/FI", "IMAGENAME eq JianyingPro.exe", "/NH"], { encoding: "utf-8" });
-  if (result.stdout && result.stdout.includes("JianyingPro.exe")) {
+  if (isJianyingRunning()) {
     throw new Error("JianyingPro is currently running. Close it, then run this again - capcut-cli refuses to write a draft while it's open.");
   }
 }

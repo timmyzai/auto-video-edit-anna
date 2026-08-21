@@ -20,11 +20,13 @@
 //     --dialogue-srt <raw-timeline SRT> --raw-timeline-map sources.json \
 //     --out keep_segments.json
 import fs from "node:fs";
+import path from "node:path";
 
 import { parseSrtFile } from "../lib/srt.js";
 import { isMeaningfulCue, meaningfulCueSourceSpans } from "./dialogue_filter.js";
 import { filterShortSpans } from "./classify.js";
 import { buildPieceBounds, findPieceIndex, indexBySourceClip, overlappingEntries, sourceClipKey, subtractSpan } from "../lib/timeline.js";
+import { withStage } from "../lib/pipeline_progress.js";
 
 const MIN_SEGMENT_DURATION_S = 1.2; // matches config's default min_segment_duration_ms
 
@@ -45,7 +47,11 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const progressPath = path.join(path.dirname(path.resolve(args.out)), "pipeline_progress.json");
+  withStage(progressPath, "filler_exclusion", () => runFillerExclusion(args));
+}
 
+function runFillerExclusion(args) {
   const clips = JSON.parse(fs.readFileSync(args.keepSegments, "utf-8"));
   const { pieces } = buildPieceBounds(clips);
   const keptBySource = indexBySourceClip(pieces);

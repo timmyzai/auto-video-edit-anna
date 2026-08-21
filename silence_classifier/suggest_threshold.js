@@ -8,7 +8,11 @@
 //
 // Usage:
 //   node silence_classifier/suggest_threshold.js --file raw/clip.mp4 [--target-percentile 90]
+import path from "node:path";
+
 import { loadPcmFloat32 } from "./extract_audio.js";
+import { updateStageProgress, withStage } from "../lib/pipeline_progress.js";
+import { projectDir } from "../jianying/lib/draft_folder.js";
 
 const WINDOW_MS = 20;
 
@@ -68,16 +72,30 @@ function main() {
     "if too much or too little survives. Lower = keeps more (safer), higher = cuts more.\n"
   );
 
-  if (args.files) {
-    const files = args.files.split(",").map((p) => p.trim());
-    const suggestions = files.map((f) => suggestForFile(f, targetP, args.targetPercentile));
-    // One comma-separated line, same order as --files, so it pipes straight
-    // into `classify.js --thresholds`.
-    console.log(suggestions.map((s) => s.toFixed(1)).join(","));
-  } else {
-    const suggested = suggestForFile(args.file, targetP, args.targetPercentile);
-    console.log(suggested.toFixed(1));
-  }
+  // --draft-name is optional - this script is also used standalone for the
+  // Premiere path, which has no projects/<name>/ folder to report into.
+  const progressPath = args.draftName ? path.join(projectDir(args.draftName), "pipeline_progress.json") : null;
+
+  const run = () => {
+    if (args.files) {
+      const files = args.files.split(",").map((p) => p.trim());
+      const suggestions = [];
+      for (const [i, f] of files.entries()) {
+        suggestions.push(suggestForFile(f, targetP, args.targetPercentile));
+        if (progressPath) updateStageProgress(progressPath, "suggest_threshold", { done: i + 1, total: files.length, note: f });
+      }
+      // One comma-separated line, same order as --files, so it pipes straight
+      // into `classify.js --thresholds`.
+      console.log(suggestions.map((s) => s.toFixed(1)).join(","));
+    } else {
+      const suggested = suggestForFile(args.file, targetP, args.targetPercentile);
+      if (progressPath) updateStageProgress(progressPath, "suggest_threshold", { done: 1, total: 1, note: args.file });
+      console.log(suggested.toFixed(1));
+    }
+  };
+
+  if (progressPath) withStage(progressPath, "suggest_threshold", run);
+  else run();
 }
 
 main();

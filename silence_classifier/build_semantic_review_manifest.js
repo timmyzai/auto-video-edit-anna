@@ -52,6 +52,7 @@ import path from "node:path";
 import { parseSrtFile } from "../lib/srt.js";
 import { isMeaningfulCue } from "./dialogue_filter.js";
 import { buildPieceBounds, indexBySourceClip, findPieceIndex, overlappingEntries, sourceClipKey } from "../lib/timeline.js";
+import { withStage } from "../lib/pipeline_progress.js";
 
 function parseArgs(argv) {
   const out = {};
@@ -93,7 +94,11 @@ function loadPriorDecided(outPath) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const progressPath = path.join(path.dirname(path.resolve(args.out)), "pipeline_progress.json");
+  withStage(progressPath, "semantic_build", () => runBuild(args));
+}
 
+function runBuild(args) {
   const clips = JSON.parse(fs.readFileSync(args.keepSegments, "utf-8"));
   const { pieces } = buildPieceBounds(clips);
   const keptBySource = indexBySourceClip(pieces);

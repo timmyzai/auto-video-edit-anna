@@ -14,6 +14,7 @@ import { loadPcmFloat32, loadPcmFloat32ForVad, probeVideo, VAD_SAMPLE_RATE } fro
 import { getVoiceSpans } from "./vad.js";
 import { meaningfulCueSourceSpans } from "./dialogue_filter.js";
 import { parseSrtFile } from "../lib/srt.js";
+import { withStage, updateStageProgress } from "../lib/pipeline_progress.js";
 
 const VIDEO_EXTS = new Set([".mp4", ".mov", ".mxf", ".avi", ".mkv"]);
 
@@ -141,6 +142,17 @@ async function classifyClip(videoPath, config, { fps, durationS }, extraKeepSpan
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // --out always lives under projects/<name>/ in the Jianying workflow (and
+  // classify.js is also used standalone for the Premiere path, which has no
+  // projects/ folder at all) - deriving the progress path from --out's own
+  // directory works either way without this script needing to know about
+  // draft names.
+  const progressPath = path.join(path.dirname(path.resolve(args.out)), "pipeline_progress.json");
+  const stageId = args.dialogueSrt ? "classify_dialogue" : "classify_amplitude";
+  await withStage(progressPath, stageId, () => runClassify(args, progressPath, stageId));
+}
+
+async function runClassify(args, progressPath, stageId) {
   const config = JSON.parse(fs.readFileSync(args.config, "utf-8"));
 
   const clips = args.files
@@ -232,6 +244,15 @@ async function main() {
     const result = await classifyClip(clip, effectiveConfig, clipMeta[i], extraKeepSpans);
     processedS += clipMeta[i].durationS;
     bar.update(Math.round(processedS), { clip: path.basename(clip) });
+    // Duration-weighted, same basis as the terminal progress bar above - a
+    // 20s clip and a 20min clip cost wildly different processing time, so
+    // "clips done" alone would give a misleading ETA once clip lengths
+    // aren't uniform.
+    updateStageProgress(progressPath, stageId, {
+      done: Math.round(processedS),
+      total: Math.max(1, Math.round(totalDurationS)),
+      note: `${path.basename(clip)} (${i + 1}/${clips.length} clips)`,
+    });
     if (result.keep.length === 0) {
       // Deferred until after bar.stop() below - interleaving console.error with an
       // active cli-progress bar corrupts the terminal line (the bar redraws over it).

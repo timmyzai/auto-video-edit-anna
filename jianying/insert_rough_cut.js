@@ -57,6 +57,7 @@ import { findDraft, loadDraft, saveDraft, findSegment, findMaterialGlobal, getTr
 
 import { detectDraftFolder, capcutBinPath, projectDir } from "./lib/draft_folder.js";
 import { buildPieceBounds, findPieceIndex, indexBySourceClip, overlappingEntries, sourceClipKey, findOverlappingSourceRanges, formatOverlapReport } from "../lib/timeline.js";
+import { startStage, updateStageProgress, completeStage, failStage, ensureStagesPresent } from "../lib/pipeline_progress.js";
 
 // --force/--dry-run are pure switches (no following value) - naively
 // consuming argv[i+1] for every flag would eat the NEXT flag's name as this
@@ -89,21 +90,6 @@ function parseArgs(argv) {
   out.force = Boolean(out.force);
   out.dryRun = Boolean(out.dryRun);
   return out;
-}
-
-function writeProgress(progressFilePath, state) {
-  try {
-    fs.writeFileSync(progressFilePath, JSON.stringify(state, null, 2));
-  } catch {
-    // Best-effort - a failed progress write must never fail a real insert.
-  }
-}
-
-function formatEta(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return null;
-  const m = Math.floor(seconds / 60);
-  const s = Math.round(seconds % 60);
-  return `${m}m${String(s).padStart(2, "0")}s`;
 }
 
 const usToS = (us) => us / 1e6;
@@ -163,6 +149,23 @@ function resolvePieceToSegments(piece, rawTimelineBySource) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const progressPath = args.progressFile
+    ? path.resolve(args.progressFile)
+    : path.join(projectDir(args.draftName), "pipeline_progress.json");
+
+  // Same file every other stage writes into (see lib/pipeline_progress.js) -
+  // whichever stage id this run turns out to be gets appended if it isn't
+  // already declared, without touching any other stage's history.
+  let stageId = "insert_1"; // corrected to insert_2 below once we know a track already exists
+  try {
+    insertRoughCut(args, progressPath, (id) => { stageId = id; });
+  } catch (err) {
+    failStage(progressPath, stageId, err);
+    throw err;
+  }
+}
+
+function insertRoughCut(args, progressPath, setStageId) {
   const capcutBin = capcutBinPath();
   const draftFolder = args.draftFolder || detectDraftFolder(capcutBin);
   const draftPath = path.join(draftFolder, args.draftName);
@@ -217,10 +220,15 @@ function main() {
     );
   }
 
-  const progressFilePath = args.progressFile
-    ? path.resolve(args.progressFile)
-    : path.join(projectDir(args.draftName), "rough_cut_progress.json");
-  const startedAt = Date.now();
+  // A track already present (that we're about to --force-replace) means
+  // this is a subsequent pass on top of an earlier insert (rough cut 2+),
+  // not the very first one - purely a progress-display label, doesn't
+  // affect behavior either way.
+  const stageId = existingTrack ? "insert_2" : "insert_1";
+  setStageId(stageId);
+  ensureStagesPresent(progressPath, args.draftName, [stageId]);
+  startStage(progressPath, stageId, { total: pieces.length });
+
   const bar = new cliProgress.SingleBar({
     format: "Building cut |{bar}| {percentage}% | {value}/{total} pieces",
     stream: process.stderr,
@@ -258,17 +266,7 @@ function main() {
     }
     bar.update(idx + 1);
     if ((idx + 1) % 25 === 0 || idx + 1 === pieces.length) {
-      const elapsedS = (Date.now() - startedAt) / 1000;
-      writeProgress(progressFilePath, {
-        status: "running",
-        draftName: args.draftName,
-        segmentsDone: idx + 1,
-        segmentsTotal: pieces.length,
-        percent: Math.round(((idx + 1) / pieces.length) * 1000) / 10,
-        elapsedSeconds: Math.round(elapsedS),
-        startedAt: new Date(startedAt).toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+      updateStageProgress(progressPath, stageId, { done: idx + 1, total: pieces.length });
     }
   });
   bar.stop();
@@ -387,14 +385,11 @@ function main() {
 
   if (args.dryRun) {
     console.error("DRY RUN - nothing written. Re-run without --dry-run to apply.");
-    writeProgress(progressFilePath, {
-      status: "dry-run",
-      draftName: args.draftName,
-      segmentsDone: pieces.length,
-      segmentsTotal: pieces.length,
-      percent: 100,
-      updatedAt: new Date().toISOString(),
-    });
+    // Deliberately not completeStage() - a dry run didn't actually finish
+    // the stage's real work, just previewed it. Left "in_progress" with a
+    // note so the next real run's completeStage() is the one that actually
+    // marks it done.
+    updateStageProgress(progressPath, stageId, { done: pieces.length, total: pieces.length, note: "dry run only - nothing written yet" });
     return;
   }
 
@@ -429,15 +424,7 @@ function main() {
     console.error(`Verified: exactly 1 video track ("${args.trackName}", ${videoTracksAfter[0].segments} segments) after write.`);
   }
 
-  writeProgress(progressFilePath, {
-    status: "done",
-    draftName: args.draftName,
-    segmentsDone: pieces.length,
-    segmentsTotal: pieces.length,
-    percent: 100,
-    startedAt: new Date(startedAt).toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
+  completeStage(progressPath, stageId, { note: `${finalVideoTrack.segments.length} segments` });
 }
 
 main();

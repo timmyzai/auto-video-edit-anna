@@ -30,6 +30,7 @@ import path from "node:path";
 import { findDraft, loadDraft, getTracksByType, findMaterial } from "capcut-cli";
 
 import { detectDraftFolder, capcutBinPath, projectDir } from "./lib/draft_folder.js";
+import { initPipeline, withStage } from "../lib/pipeline_progress.js";
 
 function parseArgs(argv) {
   const out = {};
@@ -45,6 +46,19 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  // Always the first script of a fresh pipeline run - resets
+  // pipeline_progress.json with the rough-cut-1 stage list. The optional
+  // rough-cut-2 stages get appended later (via ensureStagesPresent) only if
+  // that add-on actually runs, so a caption-free run never shows them as
+  // perpetually "pending".
+  const progressPath = path.join(projectDir(args.draftName), "pipeline_progress.json");
+  initPipeline(progressPath, args.draftName, ["resolve_draft", "suggest_threshold", "classify_amplitude", "insert_1"]);
+
+  withStage(progressPath, "resolve_draft", () => resolveDraft(args));
+}
+
+function resolveDraft(args) {
   const capcutBin = capcutBinPath();
   const draftFolder = args.draftFolder || detectDraftFolder(capcutBin);
   const draftPath = path.join(draftFolder, args.draftName);

@@ -22,6 +22,19 @@ export function projectDir(draftName) {
   return dir;
 }
 
+// Confirmed by hitting it directly: capcut-cli refuses to write a draft while
+// Jianying has it open, so callers that mutate a draft (build_draft.js,
+// insert_rough_cut.js's own caller, this repo's GUI dashboard) need to check
+// first rather than let a multi-minute job fail partway through. Returns a
+// boolean rather than throwing so callers can decide what to do with the
+// result (rough_cut.js throws immediately; the GUI reports it and disables a
+// button instead of crashing a request handler).
+export function isJianyingRunning() {
+  if (process.platform !== "win32") return false;
+  const result = spawnSync("tasklist", ["/FI", "IMAGENAME eq JianyingPro.exe", "/NH"], { encoding: "utf-8" });
+  return Boolean(result.stdout && result.stdout.includes("JianyingPro.exe"));
+}
+
 export function capcutBinPath() {
   return path.join(__dirname, "..", "..", "node_modules", ".bin", process.platform === "win32" ? "capcut.cmd" : "capcut");
 }

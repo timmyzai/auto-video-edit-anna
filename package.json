@@ -9,6 +9,7 @@
   "scripts": {
     "classify": "node silence_classifier/classify.js",
     "rough-cut": "node jianying/rough_cut.js",
+    "gui": "node gui/server.js",
     "postinstall": "patch-package"
   },
   "license": "ISC",

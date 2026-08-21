@@ -69,6 +69,7 @@ import path from "node:path";
 import { parseSrtFile, toSrtTime } from "../lib/srt.js";
 import { isMeaningfulCue } from "./dialogue_filter.js";
 import { buildPieceBounds, findPieceIndex, indexBySourceClip, overlappingEntries, sourceClipKey } from "../lib/timeline.js";
+import { withStage } from "../lib/pipeline_progress.js";
 
 const MAX_EXAMPLES_PER_GROUP = 2;
 
@@ -142,7 +143,11 @@ function groupByText(occurrences) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const progressPath = path.join(path.resolve(args.outDir), "pipeline_progress.json");
+  withStage(progressPath, "qa_report", () => runReport(args));
+}
 
+function runReport(args) {
   const clips = JSON.parse(fs.readFileSync(args.keepSegments, "utf-8"));
   const { pieces } = buildPieceBounds(clips);
   const keptBySource = indexBySourceClip(pieces);

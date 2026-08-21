@@ -28,6 +28,7 @@ import { findDraft, loadDraft, getTracksByType, findMaterialGlobal } from "capcu
 
 import { detectDraftFolder, capcutBinPath, projectDir } from "./lib/draft_folder.js";
 import { findOverlappingSourceRanges, formatOverlapReport } from "../lib/timeline.js";
+import { withStage } from "../lib/pipeline_progress.js";
 
 function parseArgs(argv) {
   const out = { trackName: "Rough Cut" };
@@ -45,6 +46,11 @@ const usToS = (us) => us / 1e6;
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  const progressPath = path.join(projectDir(args.draftName), "pipeline_progress.json");
+  withStage(progressPath, "rebuild_raw_map", () => runRebuild(args));
+}
+
+function runRebuild(args) {
   const capcutBin = capcutBinPath();
   const draftFolder = args.draftFolder || detectDraftFolder(capcutBin);
   const draftPath = path.join(draftFolder, args.draftName);
